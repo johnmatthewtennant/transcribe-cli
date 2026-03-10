@@ -15,6 +15,16 @@ Uses two macOS APIs to capture dual-channel audio:
 
 Both streams are converted to the format required by SpeechAnalyzer via `AVAudioConverter`.
 
+**Shared reference clock and timestamping strategy:**
+1. When each audio stream starts, record an **origin pair**: `(streamStartHostTime: mach_continuous_time(), streamStartSampleTime: CMTime.zero)`.
+2. When a `SpeechTranscriber` emits a finalized result with `audioTimeRange.start` (in stream-local sample time), convert to wall-clock: `wallClock = streamStartHostTime + (audioTimeRange.start - streamStartSampleTime)`.
+3. All timestamps displayed and written use **utterance start time** consistently.
+4. The reorder buffer merges across channels using these wall-clock timestamps.
+
+**Backpressure policy (split by path):**
+- **Audio capture → transcription (primary path):** Bounded `AsyncStream` with **blocking** backpressure. If the transcriber falls behind, the producer blocks. This ensures no audio is silently dropped and no transcript content is lost.
+- **Transcription → terminal volatile preview:** Bounded channel with **drop-oldest** policy. Dropping partial previews is acceptable since they are ephemeral UI state.
+
 ### Transcription (SpeechAnalyzer — macOS Tahoe 26+)
 
 Apple's new on-device speech-to-text API, introduced at WWDC25. Runs on the Neural Engine (Apple Silicon), processes at ~190x real-time speed, 55% faster than Whisper.
@@ -81,9 +91,11 @@ Writes to `~/.transcripts/{date}-{slugified-title}.md`:
 **You** (14:30:25): Great, let me share my screen...
 ```
 
-- Finalized results are appended to the file as they arrive
-- Volatile (partial) results are shown in the terminal only
-- Lines are ordered chronologically by timestamp across both channels
+- Finalized results pass through a **reorder buffer** (2-second watermark) before writing to ensure chronological ordering across channels. When a result arrives with timestamp T, all buffered results with timestamp < T-2s are flushed to file in sorted order.
+- Volatile (partial) results are shown in the terminal only (no reorder buffer needed)
+- Lines are ordered chronologically by the shared reference clock timestamp
+- File writes use line-buffered I/O with explicit `fflush` after each append for crash durability
+- Transcript files are created with `0600` permissions (owner read/write only)
 
 ## CLI Interface
 
@@ -114,6 +126,7 @@ transcribe --speakers "Jack,Jeanne"
 - Ctrl+C to stop — prints summary (duration, word count, file path)
 - `--resume` reopens an existing file, appends `\n---\n\n*Resumed at HH:MM*\n\n`, and continues
 - `--resume` with no argument resumes the most recent file
+- `--resume` accepts filename only (no paths), resolved under `~/.transcripts/`. Rejects `..`, absolute paths, and non-existent files with clear error messages
 
 ## Project Structure
 
@@ -137,29 +150,41 @@ jtennant-transcriber/
 
 ### Phase 1: Audio capture
 1. Set up SPM project targeting macOS 26
-2. Implement mic capture via `AVAudioEngine`
-3. Implement system audio capture via `ScreenCaptureKit`
-4. Verify both streams produce valid `AVAudioPCMBuffer` output
-5. Handle permission prompts (mic + screen recording)
+2. Add `#available(macOS 26, *)` startup gate with clear error message on unsupported OS
+3. Implement mic capture via `AVAudioEngine` with `mach_continuous_time()` timestamping per buffer
+4. Implement system audio capture via `ScreenCaptureKit` with `mach_continuous_time()` timestamping per buffer
+5. Verify both streams produce valid `AVAudioPCMBuffer` output
+6. Add permission preflight checks before starting capture:
+   - Check mic permission via `AVCaptureDevice.authorizationStatus(for: .audio)`
+   - Check screen recording permission via `CGPreflightScreenCaptureAccess()` / `CGRequestScreenCaptureAccess()`
+   - Print actionable instructions if denied (e.g., "Open System Settings > Privacy > Screen Recording")
+   - Fail fast with clear error rather than silently producing empty audio
+7. Use bounded `AsyncStream` channels between capture and transcription with **blocking** backpressure (no audio drops on primary path); separate drop-oldest channel for volatile terminal preview only
 
 ### Phase 2: Transcription
-1. Initialize `AssetInventory` and download speech model if needed
+1. Initialize `AssetInventory` and download speech model if needed:
+   - Show download progress in terminal
+   - Handle offline/network errors with clear messaging
+   - Retry with backoff on transient failures
+   - Fail fast before starting audio capture if model unavailable
 2. Create two `SpeechTranscriber` instances (mic + system)
 3. Create two `SpeechAnalyzer` instances, feed audio buffers from Phase 1
 4. Read volatile + finalized results from both transcribers
-5. Merge results chronologically by `audioTimeRange`
+5. Merge results chronologically using shared reference clock timestamps (not `audioTimeRange`)
 
 ### Phase 3: Output
-1. Write finalized results to markdown file with speaker labels + timestamps
-2. Print to terminal with ANSI colors (e.g., green for "You", blue for "Remote")
-3. Show volatile results as an updating line at the bottom of the terminal
-4. Handle Ctrl+C gracefully — finalize analyzers, print summary
+1. Write finalized results to markdown file with speaker labels + timestamps via reorder buffer
+2. Create transcript files with `0600` permissions, line-buffered writes with explicit flush
+3. Print to terminal with ANSI colors (e.g., green for "You", blue for "Remote")
+4. Show volatile results as an updating line at the bottom of the terminal (serialized to avoid garbled output from concurrent speakers)
+5. Handle Ctrl+C gracefully — flush reorder buffer, finalize analyzers, print summary
 
 ### Phase 4: CLI polish
 1. Argument parsing (--title, --resume, --list, --speakers)
-2. Resume logic (find file, append separator, continue)
-3. List recordings from ~/.transcripts/
-4. Install as `transcribe` in PATH (e.g., symlink or `swift build` + copy)
+2. Sanitize `--title` and `--speakers` values: strip markdown special characters, escape terminal control sequences, validate length
+3. Resume logic (find file under `~/.transcripts/` only, validate filename, append separator, continue)
+4. List recordings from ~/.transcripts/
+5. Install as `transcribe` in PATH (e.g., symlink or `swift build` + copy)
 
 ## Dependencies
 
