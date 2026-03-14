@@ -1,7 +1,19 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import os
 import ScreenCaptureKit
+
+/// Diagnostic logger for tracking dropped audio buffers and conversion failures.
+final class DiagnosticLog: Sendable {
+    static let shared = DiagnosticLog()
+    private let logger = Logger(subsystem: "com.transcriber", category: "diagnostics")
+
+    func log(_ message: String) {
+        logger.warning("\(message, privacy: .public)")
+        fputs("[DIAG] \(message)\n", stderr)
+    }
+}
 
 /// Timestamped audio buffer from either mic or system audio capture.
 struct TimestampedBuffer: @unchecked Sendable {
@@ -34,8 +46,8 @@ final class AudioCapture: NSObject, Sendable {
         var sysCont: AsyncStream<TimestampedBuffer>.Continuation!
 
         // Use bounded buffering strategy for backpressure
-        micStream = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { micCont = $0 }
-        systemStream = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { sysCont = $0 }
+        micStream = AsyncStream(bufferingPolicy: .bufferingNewest(256)) { micCont = $0 }
+        systemStream = AsyncStream(bufferingPolicy: .bufferingNewest(256)) { sysCont = $0 }
 
         _micContinuation = micCont
         _systemContinuation = sysCont

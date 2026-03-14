@@ -6,12 +6,14 @@ final class MarkdownWriter: @unchecked Sendable {
     private let filePath: URL
     private let fileHandle: FileHandle
     private let startDate: Date
+    private let referenceMachTime: UInt64
     private let lock = NSLock()
     private(set) var wordCount: Int = 0
 
     init(filePath: URL, title: String, isResume: Bool, micSpeaker: String, systemSpeaker: String) throws {
         self.filePath = filePath
         self.startDate = Date()
+        self.referenceMachTime = mach_continuous_time()
 
         if isResume {
             // File must already exist
@@ -64,21 +66,18 @@ final class MarkdownWriter: @unchecked Sendable {
 
     /// Format a wall-clock mach_continuous_time value as HH:mm:ss.
     private func formatTimestamp(wallClockTime: UInt64) -> String {
-        // Convert mach_continuous_time to approximate wall-clock offset from start
-        // mach_continuous_time is approximately nanoseconds on Apple Silicon
+        // wallClockTime and referenceMachTime are both in mach_continuous_time units.
+        // Compute the offset from session start, then add to startDate.
         let info = machTimebaseInfo()
-        let nanos = wallClockTime * UInt64(info.numer) / UInt64(info.denom)
-        let startNanos = UInt64(startDate.timeIntervalSince1970 * 1_000_000_000)
+        let offsetTicks = wallClockTime >= referenceMachTime
+            ? wallClockTime - referenceMachTime
+            : 0
+        let offsetNanos = offsetTicks * UInt64(info.numer) / UInt64(info.denom)
+        let offsetSeconds = Double(offsetNanos) / 1_000_000_000
 
-        // We use the session start date as reference
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
-
-        // Best effort: use start date + offset from first buffer
-        // For display purposes, we just use the session start time offset
-        return formatter.string(from: startDate.addingTimeInterval(
-            Double(nanos) / 1_000_000_000 - Double(startNanos) / 1_000_000_000
-        ))
+        return formatter.string(from: startDate.addingTimeInterval(offsetSeconds))
     }
 
     private func machTimebaseInfo() -> mach_timebase_info_data_t {
