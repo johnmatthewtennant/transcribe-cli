@@ -7,7 +7,8 @@ Live recordings stream to the terminal in real time and save to a markdown file.
 ## Install
 
 ```bash
-brew install --with-skill johnmatthewtennant/tap/swift-transcribe
+brew install johnmatthewtennant/tap/swift-transcribe
+curl -sL https://raw.githubusercontent.com/johnmatthewtennant/swift-transcribe/master/.agents/skills/transcribe-audio/SKILL.md -o ~/.claude/skills/transcribe-audio/SKILL.md --create-dirs
 ```
 
 Requires macOS 26+ (Tahoe).
