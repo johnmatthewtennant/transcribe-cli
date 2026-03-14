@@ -11,21 +11,22 @@ struct TranscriptEvent: Sendable {
     let isFinal: Bool
 }
 
-/// Manages two SpeechTranscriber instances (mic + system) and merges results.
+/// Manages SpeechTranscriber instances and merges results.
+/// Supports dual-channel mode (mic + system) for live recording,
+/// and single-channel mode for file transcription.
 @available(macOS 26.0, *)
 actor TranscriptionEngine {
-    private let audioCapture: AudioCapture
+    private let audioCapture: AudioCapture?
+    private let fileSource: FileAudioSource?
     private let writer: MarkdownWriter
     private let terminal: TerminalUI
     private let micSpeaker: String
     private let systemSpeaker: String
 
     private var isStopped = false
+    private var reorderBuffer: ReorderBuffer
 
-    // Reorder buffer for chronological file writes (2-second watermark)
-    private var reorderBuffer: [TranscriptEvent] = []
-    private let watermarkNanos: UInt64 = 2_000_000_000  // 2 seconds approx
-
+    /// Initialize for live dual-channel recording.
     init(
         audioCapture: AudioCapture,
         writer: MarkdownWriter,
@@ -34,25 +35,62 @@ actor TranscriptionEngine {
         systemSpeaker: String
     ) async throws {
         self.audioCapture = audioCapture
+        self.fileSource = nil
         self.writer = writer
         self.terminal = terminal
         self.micSpeaker = micSpeaker
         self.systemSpeaker = systemSpeaker
+        // Temporary placeholder — will be replaced after self is fully initialized
+        self.reorderBuffer = ReorderBuffer { _ in }
+        // Now replace with real callback that captures self
+        self.reorderBuffer = ReorderBuffer { [writer, terminal] event in
+            writer.writeLine(speaker: event.speaker, text: event.text, wallClockTime: event.wallClockTime)
+            terminal.showFinalized(speaker: event.speaker, text: event.text)
+        }
     }
 
-    /// Run both transcription streams until stopped.
+    /// Initialize for single-channel file transcription.
+    init(
+        fileSource: FileAudioSource,
+        writer: MarkdownWriter,
+        terminal: TerminalUI,
+        speaker: String
+    ) async throws {
+        self.audioCapture = nil
+        self.fileSource = fileSource
+        self.writer = writer
+        self.terminal = terminal
+        self.micSpeaker = speaker
+        self.systemSpeaker = speaker
+        self.reorderBuffer = ReorderBuffer { _ in }
+        self.reorderBuffer = ReorderBuffer { [writer, terminal] event in
+            writer.writeLine(speaker: event.speaker, text: event.text, wallClockTime: event.wallClockTime)
+            terminal.showFinalized(speaker: event.speaker, text: event.text)
+        }
+    }
+
+    /// Run transcription until stopped or input is exhausted.
     func run() async throws {
+        if let fileSource {
+            try await runFileTranscription(fileSource: fileSource)
+        } else if let audioCapture {
+            try await runLiveTranscription(audioCapture: audioCapture)
+        }
+    }
+
+    /// Run dual-channel live transcription.
+    private func runLiveTranscription(audioCapture: AudioCapture) async throws {
         // Create transcribers with volatile results and time range attributes
         let micTranscriber = SpeechTranscriber(
             locale: Locale(identifier: "en-US"),
             transcriptionOptions: [],
-            reportingOptions: [.volatileResults],
+            reportingOptions: [],
             attributeOptions: [.audioTimeRange]
         )
         let systemTranscriber = SpeechTranscriber(
             locale: Locale(identifier: "en-US"),
             transcriptionOptions: [],
-            reportingOptions: [.volatileResults],
+            reportingOptions: [],
             attributeOptions: [.audioTimeRange]
         )
 
@@ -81,15 +119,68 @@ actor TranscriptionEngine {
                 await self.processResults(
                     transcriber: micTranscriber,
                     speaker: self.micSpeaker,
-                    originHostTime: self.audioCapture.micOriginHostTime
+                    getOriginHostTime: { self.audioCapture!.micOriginHostTime }
                 )
             }
             group.addTask { [self] in
                 await self.processResults(
                     transcriber: systemTranscriber,
                     speaker: self.systemSpeaker,
-                    originHostTime: self.audioCapture.systemOriginHostTime
+                    getOriginHostTime: { self.audioCapture!.systemOriginHostTime }
                 )
+            }
+
+            // Periodic flush: drain any events stuck in the reorder buffer
+            group.addTask {
+                while await !self.isStopped {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    await self.periodicFlush()
+                }
+            }
+
+            await group.waitForAll()
+        }
+    }
+
+    /// Run single-channel file transcription.
+    private func runFileTranscription(fileSource: FileAudioSource) async throws {
+        let transcriber = SpeechTranscriber(
+            locale: Locale(identifier: "en-US"),
+            transcriptionOptions: [],
+            reportingOptions: [],
+            attributeOptions: [.audioTimeRange]
+        )
+
+        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+            throw TranscribeError.modelUnavailable("No compatible audio format available. The speech model may not be installed.")
+        }
+
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        let inputStream = makeAnalyzerInputStream(from: fileSource.stream, targetFormat: format)
+
+        await withTaskGroup(of: Void.self) { group in
+            // Feed audio from file
+            group.addTask {
+                try? await fileSource.start()
+            }
+            // Run analyzer
+            group.addTask {
+                try? await analyzer.start(inputSequence: inputStream)
+            }
+            // Process results
+            group.addTask { [self] in
+                await self.processResults(
+                    transcriber: transcriber,
+                    speaker: self.micSpeaker,
+                    getOriginHostTime: { fileSource.originHostTime }
+                )
+            }
+            // Periodic flush
+            group.addTask {
+                while await !self.isStopped {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    await self.periodicFlush()
+                }
             }
 
             await group.waitForAll()
@@ -100,14 +191,23 @@ actor TranscriptionEngine {
     private func processResults(
         transcriber: SpeechTranscriber,
         speaker: String,
-        originHostTime: UInt64
+        getOriginHostTime: @Sendable () -> UInt64
     ) async {
+        var resultCount = 0
+        var finalCount = 0
         do {
             for try await result in transcriber.results {
                 guard !isStopped else { break }
+                resultCount += 1
 
                 let text = String(result.text.characters)
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+
+                // Read originHostTime lazily — it's set by the audio callback on first buffer
+                let originHostTime = getOriginHostTime()
+                if originHostTime == 0 {
+                    DiagnosticLog.shared.log("[\(speaker)] originHostTime still 0 at result #\(resultCount) — timestamps will be inaccurate")
+                }
 
                 // Convert result.range.start to wall-clock using origin host time
                 let audioStartSeconds = CMTimeGetSeconds(result.range.start)
@@ -122,10 +222,8 @@ actor TranscriptionEngine {
                 )
 
                 if result.isFinal {
-                    addToReorderBuffer(event)
-                } else {
-                    // Volatile: show in terminal immediately
-                    terminal.showVolatile(speaker: speaker, text: text)
+                    finalCount += 1
+                    reorderBuffer.add(event)
                 }
             }
         } catch {
@@ -133,36 +231,16 @@ actor TranscriptionEngine {
                 terminal.printError("Transcription error for \(speaker): \(error.localizedDescription)")
             }
         }
+        DiagnosticLog.shared.log("[\(speaker)] processResults ended: \(resultCount) results, \(finalCount) final events emitted")
     }
 
-    // MARK: - Reorder Buffer
-
-    private func addToReorderBuffer(_ event: TranscriptEvent) {
-        reorderBuffer.append(event)
-        flushReorderBuffer(currentTime: event.wallClockTime)
-    }
-
-    private func flushReorderBuffer(currentTime: UInt64) {
-        let cutoff = currentTime > watermarkNanos ? currentTime - watermarkNanos : 0
-        let ready = reorderBuffer.filter { $0.wallClockTime < cutoff }
-            .sorted { $0.wallClockTime < $1.wallClockTime }
-
-        for event in ready {
-            writer.writeLine(speaker: event.speaker, text: event.text, wallClockTime: event.wallClockTime)
-            terminal.showFinalized(speaker: event.speaker, text: event.text)
-        }
-
-        reorderBuffer.removeAll { $0.wallClockTime < cutoff }
+    private func periodicFlush() {
+        reorderBuffer.flushStale()
     }
 
     func stop() {
         isStopped = true
-        // Flush remaining reorder buffer
-        let remaining = reorderBuffer.sorted { $0.wallClockTime < $1.wallClockTime }
-        for event in remaining {
-            writer.writeLine(speaker: event.speaker, text: event.text, wallClockTime: event.wallClockTime)
-        }
-        reorderBuffer.removeAll()
+        reorderBuffer.flushAll()
     }
 }
 
@@ -177,13 +255,20 @@ func makeAnalyzerInputStream(
     AsyncStream { continuation in
         Task {
             var converter: AVAudioConverter?
+            var bufferCount = 0
+            var dropCount = 0
 
             for await timestamped in stream {
+                bufferCount += 1
                 let sourceFormat = timestamped.buffer.format
 
                 // Initialize converter on first buffer if formats differ
                 if converter == nil && sourceFormat != targetFormat {
+                    DiagnosticLog.shared.log("[AnalyzerInput] Format conversion needed: \(sourceFormat) → \(targetFormat)")
                     converter = AVAudioConverter(from: sourceFormat, to: targetFormat)
+                    if converter == nil {
+                        DiagnosticLog.shared.log("[AnalyzerInput] ERROR: AVAudioConverter creation failed!")
+                    }
                 }
 
                 let outputBuffer: AVAudioPCMBuffer
@@ -193,6 +278,10 @@ func makeAnalyzerInputStream(
                     )
                     guard frameCapacity > 0,
                           let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCapacity) else {
+                        dropCount += 1
+                        if dropCount <= 5 {
+                            DiagnosticLog.shared.log("[AnalyzerInput] Dropped buffer #\(bufferCount): could not allocate converted buffer (frameCapacity=\(frameCapacity))")
+                        }
                         continue
                     }
 
@@ -208,7 +297,20 @@ func makeAnalyzerInputStream(
                         return nil
                     }
 
-                    if error != nil || convertedBuffer.frameLength == 0 { continue }
+                    if let error {
+                        dropCount += 1
+                        if dropCount <= 5 {
+                            DiagnosticLog.shared.log("[AnalyzerInput] Conversion error at buffer #\(bufferCount): \(error.localizedDescription)")
+                        }
+                        continue
+                    }
+                    if convertedBuffer.frameLength == 0 {
+                        dropCount += 1
+                        if dropCount <= 5 {
+                            DiagnosticLog.shared.log("[AnalyzerInput] Conversion produced 0 frames at buffer #\(bufferCount)")
+                        }
+                        continue
+                    }
                     outputBuffer = convertedBuffer
                 } else {
                     outputBuffer = timestamped.buffer
@@ -219,6 +321,9 @@ func makeAnalyzerInputStream(
                 continuation.yield(input)
             }
 
+            if dropCount > 0 {
+                DiagnosticLog.shared.log("[AnalyzerInput] Stream ended: \(bufferCount) buffers received, \(dropCount) dropped")
+            }
             continuation.finish()
         }
     }

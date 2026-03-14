@@ -25,15 +25,107 @@ struct Transcribe: AsyncParsableCommand {
     @Option(name: .long, help: "Comma-separated speaker names (e.g. \"Jack,Jeanne\"). First is mic, second is system audio.")
     var speakers: String?
 
+    @Option(name: .long, help: "Path to an audio file (m4a, wav, mp3, caf, etc.) to transcribe offline.")
+    var file: String?
+
     mutating func run() async throws {
         let transcriptsDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".transcripts")
+            .appendingPathComponent("Documents/transcripts")
 
         if list {
             try listRecordings(in: transcriptsDir)
             return
         }
 
+        if let file {
+            try await runFileTranscription(file: file, transcriptsDir: transcriptsDir)
+        } else {
+            try await runLiveRecording(transcriptsDir: transcriptsDir)
+        }
+    }
+
+    /// Transcribe an existing audio file.
+    private func runFileTranscription(file: String, transcriptsDir: URL) async throws {
+        let fileURL = URL(fileURLWithPath: (file as NSString).expandingTildeInPath)
+            .standardizedFileURL
+
+        // Use the filename (without extension) as default title
+        let fileTitle = sanitizeTitle(title) ?? fileURL.deletingPathExtension().lastPathComponent
+        let speakerName = speakers.flatMap { $0.split(separator: ",").first.map { sanitizeSpeakerName(String($0.trimmingCharacters(in: .whitespaces))) } } ?? "Speaker"
+
+        let terminal = TerminalUI(micSpeaker: speakerName, systemSpeaker: speakerName)
+        terminal.printInfo("Transcribing file: \(fileURL.path)")
+
+        // Ensure speech model is available
+        terminal.printInfo("Checking speech model availability...")
+        try await ensureSpeechModel(terminal: terminal)
+
+        // Determine output file
+        let resumeTarget: String? = if let resume { resume } else if resumeLast { try mostRecentRecording(in: transcriptsDir) } else { nil }
+        let (outputPath, isResume) = try resolveOutputFile(
+            transcriptsDir: transcriptsDir,
+            title: fileTitle,
+            resume: resumeTarget
+        )
+
+        if isResume {
+            terminal.printInfo("Appending to: \(outputPath.path)")
+        } else {
+            terminal.printInfo("Writing to: \(outputPath.path)")
+        }
+
+        // Set up markdown writer
+        let writer = try MarkdownWriter(
+            filePath: outputPath,
+            title: fileTitle,
+            isResume: isResume,
+            micSpeaker: speakerName,
+            systemSpeaker: speakerName
+        )
+
+        // Set up file audio source
+        let fileSource = try FileAudioSource(filePath: fileURL)
+
+        // Set up transcription engine (single-channel)
+        let engine = try await TranscriptionEngine(
+            fileSource: fileSource,
+            writer: writer,
+            terminal: terminal,
+            speaker: speakerName
+        )
+
+        let startTime = Date()
+        setupSignalHandler {
+            Task {
+                await engine.stop()
+                fileSource.stop()
+                writer.flush()
+                terminal.printSummary(
+                    duration: Date().timeIntervalSince(startTime),
+                    wordCount: writer.wordCount,
+                    filePath: outputPath
+                )
+                Foundation.exit(0)
+            }
+        }
+
+        terminal.printInfo("Transcribing...\n")
+
+        // Run transcription — will complete when file is fully processed
+        try await engine.run()
+
+        // File transcription completes naturally (unlike live recording)
+        await engine.stop()
+        writer.flush()
+        terminal.printSummary(
+            duration: Date().timeIntervalSince(startTime),
+            wordCount: writer.wordCount,
+            filePath: outputPath
+        )
+    }
+
+    /// Run live mic + system audio recording and transcription.
+    private func runLiveRecording(transcriptsDir: URL) async throws {
         // Parse speaker names
         let speakerNames = parseSpeakerNames(speakers)
         let micSpeaker = speakerNames.0
@@ -51,9 +143,9 @@ struct Transcribe: AsyncParsableCommand {
         let terminal = TerminalUI(micSpeaker: micSpeaker, systemSpeaker: systemSpeaker)
 
         if isResume {
-            terminal.printInfo("Resuming: \(filePath.lastPathComponent)")
+            terminal.printInfo("Resuming: \(filePath.path)")
         } else {
-            terminal.printInfo("Recording to: \(filePath.lastPathComponent)")
+            terminal.printInfo("Recording to: \(filePath.path)")
         }
 
         // Ensure speech model is available
@@ -169,10 +261,10 @@ func resolveOutputFile(transcriptsDir: URL, title: String?, resume: String?) thr
 
     // New recording
     let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd"
-    let dateStr = formatter.string(from: Date())
-    let titleSlug = slugify(title ?? defaultTitle())
-    let filename = "\(dateStr)-\(titleSlug).md"
+    formatter.dateFormat = "yyyy-MM-dd-HHmm"
+    let dateTime = formatter.string(from: Date())
+    let slug = slugify(title ?? "recording")
+    let filename = "\(slug)-\(dateTime).md"
     let filePath = transcriptsDir.appendingPathComponent(filename)
 
     return (filePath, false)
@@ -224,11 +316,15 @@ func listRecordings(in dir: URL) throws {
     }
 }
 
+/// Retained globally so the dispatch source isn't deallocated.
+private nonisolated(unsafe) var _signalSource: DispatchSourceSignal?
+
 func setupSignalHandler(_ handler: @escaping () -> Void) {
     signal(SIGINT, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
     source.setEventHandler { handler() }
     source.resume()
+    _signalSource = source
 }
 
 @available(macOS 26.0, *)
