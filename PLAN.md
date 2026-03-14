@@ -251,6 +251,17 @@ Replace SpeechAnalyzer with FluidAudio's `StreamingAsrManager` + streaming diari
 
 **If Path C is implemented, post-processing (Paths A/B) becomes optional** — only needed if you want even higher accuracy from a second pass.
 
+### Future: Volatile (partial) transcript preview
+
+The SpeechTranscriber API supports `reportingOptions: [.volatileResults]` which provides real-time partial transcripts before they're finalized. This was implemented in the MVP but removed because:
+- The single volatile line in the terminal caused visual bugs (one speaker's partial overwrites the other's)
+- Finalized results appeared delayed due to the reorder buffer watermark
+- Users perceived "always one result missing" from the display
+
+To re-enable, add `.volatileResults` back to the `reportingOptions` in `TranscriptionEngine.swift` and implement per-speaker volatile lines in `TerminalUI.swift`. Consider a two-line volatile display (one per channel) instead of a single shared line.
+
+See the commit that removed volatile results for the original implementation.
+
 ### Path comparison
 
 | | MVP | +Path A (11Labs post) | +Path B (Fluid post) | Path C (Fluid real-time) |
