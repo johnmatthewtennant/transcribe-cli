@@ -5,8 +5,7 @@ On-device speech-to-text for macOS using Apple's SpeechAnalyzer (Neural Engine).
 ## Install
 
 ```bash
-brew install johnmatthewtennant/tap/swift-transcribe
-brew install --with-skill johnmatthewtennant/tap/swift-transcribe  # + Claude Code skill
+brew install --with-skill johnmatthewtennant/tap/swift-transcribe
 ```
 
 Requires macOS 26+ (Tahoe).
