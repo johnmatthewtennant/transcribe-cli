@@ -58,27 +58,33 @@ final class AudioCapture: NSObject, Sendable {
     // MARK: - Permissions
 
     func checkPermissions() async throws {
+        var denied: [TranscribeError] = []
+
         // Check microphone permission
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             break
         case .notDetermined:
             let granted = await AVCaptureDevice.requestAccess(for: .audio)
-            guard granted else {
-                throw TranscribeError.micPermissionDenied
+            if !granted {
+                denied.append(.micPermissionDenied)
             }
         case .denied, .restricted:
-            throw TranscribeError.micPermissionDenied
+            denied.append(.micPermissionDenied)
         @unknown default:
-            throw TranscribeError.micPermissionDenied
+            denied.append(.micPermissionDenied)
         }
 
         // Check screen recording permission (for system audio)
         if !CGPreflightScreenCaptureAccess() {
             let granted = CGRequestScreenCaptureAccess()
             if !granted {
-                throw TranscribeError.screenRecordingPermissionDenied
+                denied.append(.screenRecordingPermissionDenied)
             }
+        }
+
+        if !denied.isEmpty {
+            throw TranscribeError.permissionsDenied(denied)
         }
     }
 
@@ -234,6 +240,7 @@ extension CMSampleBuffer {
 enum TranscribeError: LocalizedError {
     case micPermissionDenied
     case screenRecordingPermissionDenied
+    case permissionsDenied([TranscribeError])
     case noMicrophoneAvailable
     case noDisplayAvailable
     case modelUnavailable(String)
@@ -252,6 +259,8 @@ enum TranscribeError: LocalizedError {
             Open System Settings > Privacy & Security > Screen Recording and grant access to this app.
             Then restart the app.
             """
+        case .permissionsDenied(let errors):
+            return errors.map { $0.localizedDescription }.joined(separator: "\n")
         case .noMicrophoneAvailable:
             return "No microphone available. Check that a microphone is connected."
         case .noDisplayAvailable:

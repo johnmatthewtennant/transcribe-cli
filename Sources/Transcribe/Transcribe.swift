@@ -327,6 +327,10 @@ private nonisolated(unsafe) var _signalSource: DispatchSourceSignal?
 /// Print a detailed permission error with troubleshooting steps to stderr.
 func printPermissionError(_ error: TranscribeError) {
     switch error {
+    case .permissionsDenied(let errors):
+        for err in errors {
+            printPermissionError(err)
+        }
     case .micPermissionDenied:
         fputs("""
         Error: Microphone access denied.
@@ -344,6 +348,8 @@ func printPermissionError(_ error: TranscribeError) {
 
         3. Check System Settings > Privacy & Security > Microphone
            and ensure your terminal app is allowed.
+
+        Then retry: transcribe
 
         """, stderr)
     case .screenRecordingPermissionDenied:
@@ -363,6 +369,8 @@ func printPermissionError(_ error: TranscribeError) {
 
         3. Check System Settings > Privacy & Security > Screen Recording
            and ensure your terminal app is allowed. You may need to restart the terminal after granting access.
+
+        Then retry: transcribe
 
         """, stderr)
     default:
