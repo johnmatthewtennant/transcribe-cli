@@ -10,7 +10,8 @@ final class MarkdownWriter: @unchecked Sendable {
     private let lock = NSLock()
     private(set) var wordCount: Int = 0
 
-    init(filePath: URL, title: String, isResume: Bool, micSpeaker: String, systemSpeaker: String) throws {
+    init(filePath: URL, title: String, isResume: Bool, micSpeaker: String, systemSpeaker: String,
+         sourceAudioFilename: String? = nil) throws {
         self.filePath = filePath
         self.startDate = Date()
         self.referenceMachTime = mach_continuous_time()
@@ -39,6 +40,12 @@ final class MarkdownWriter: @unchecked Sendable {
             formatter.dateFormat = "yyyy-MM-dd HH:mm"
             let header = "# \(title) — \(formatter.string(from: Date()))\n\n"
             fileHandle.write(header.data(using: .utf8)!)
+
+            // Write source audio reference for file transcription mode
+            if let sourceAudioFilename {
+                let sourceLine = "*Source: \(sourceAudioFilename)*\n\n"
+                fileHandle.write(sourceLine.data(using: .utf8)!)
+            }
         }
     }
 

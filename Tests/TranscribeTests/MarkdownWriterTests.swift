@@ -104,6 +104,39 @@ struct MarkdownWriterTests {
         #expect(content.contains(timestampPattern))
     }
 
+    @Test func sourceAudioFilenameInHeader() throws {
+        defer { cleanup() }
+        let path = tmpDir.appendingPathComponent("source.md")
+        let writer = try MarkdownWriter(
+            filePath: path,
+            title: "File Transcription",
+            isResume: false,
+            micSpeaker: "Speaker",
+            systemSpeaker: "Speaker",
+            sourceAudioFilename: "meeting.m4a"
+        )
+        writer.flush()
+
+        let content = try String(contentsOf: path, encoding: .utf8)
+        #expect(content.contains("*Source: meeting.m4a*"))
+    }
+
+    @Test func noSourceAudioFilenameByDefault() throws {
+        defer { cleanup() }
+        let path = tmpDir.appendingPathComponent("nosource.md")
+        let writer = try MarkdownWriter(
+            filePath: path,
+            title: "Live Recording",
+            isResume: false,
+            micSpeaker: "You",
+            systemSpeaker: "Remote"
+        )
+        writer.flush()
+
+        let content = try String(contentsOf: path, encoding: .utf8)
+        #expect(!content.contains("*Source:"))
+    }
+
     @Test func wordCountTracking() throws {
         defer { cleanup() }
         let path = tmpDir.appendingPathComponent("wordcount.md")
