@@ -177,4 +177,27 @@ struct MarkdownWriterTests {
         #expect(content.contains("First line"))
         #expect(content.contains("Second line"))
     }
+
+    @Test func sourceAudioFilenameControlCharsSanitized() throws {
+        defer { cleanup() }
+        let path = tmpDir.appendingPathComponent("sanitized.md")
+        let writer = try MarkdownWriter(
+            filePath: path,
+            title: "Test",
+            isResume: false,
+            micSpeaker: "Speaker",
+            systemSpeaker: "Speaker",
+            sourceAudioFilename: "meeting\n# Injected Header\n.m4a"
+        )
+        writer.flush()
+
+        let content = try String(contentsOf: path, encoding: .utf8)
+        // Newlines should be stripped, so "# Injected Header" won't be on its own line
+        // (which would render as a markdown heading)
+        let lines = content.components(separatedBy: "\n")
+        let hasInjectedHeading = lines.contains { $0.hasPrefix("# Injected") }
+        #expect(!hasInjectedHeading)
+        // The sanitized filename is all on one line
+        #expect(content.contains("*Source: meeting# Injected Header.m4a*"))
+    }
 }

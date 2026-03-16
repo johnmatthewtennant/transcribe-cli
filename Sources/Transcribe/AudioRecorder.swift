@@ -2,14 +2,15 @@
 import Foundation
 
 /// Records a single channel of audio to a mono CAF file.
-/// Thread-safe -- all file writes are serialized on an internal queue.
-/// Format normalization happens synchronously on the caller's thread to ensure buffer ownership safety.
+/// Thread-safe -- normalization/conversion are serialized by `converterLock`,
+/// and file writes are serialized on an internal dispatch queue.
 final class AudioRecorder: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.transcriber.recorder", qos: .userInitiated)
     private var audioFile: AVAudioFile?
     private let outputFormat: AVAudioFormat  // mono PCM float32, non-interleaved
     private var sampleRateConverter: AVAudioConverter?
     private var normalizer: AVAudioConverter?  // cached per-format normalizer
+    private let converterLock = NSLock()  // protects normalizer + sampleRateConverter
 
     init(sampleRate: Double = 48000.0) {
         self.outputFormat = AVAudioFormat(
@@ -37,6 +38,9 @@ final class AudioRecorder: @unchecked Sendable {
     /// Format normalization happens synchronously on the caller's thread.
     /// Only the owned, normalized buffer is dispatched for async file I/O.
     func write(buffer: AVAudioPCMBuffer) {
+        converterLock.lock()
+        defer { converterLock.unlock() }
+
         // Step 1: Synchronously normalize to mono float32 (produces an owned buffer)
         guard let normalized = normalizeToMonoFloat(buffer: buffer) else {
             DiagnosticLog.shared.log("[AudioRecorder] Failed to normalize buffer format: \(buffer.format)")
@@ -169,6 +173,10 @@ final class AudioRecorder: @unchecked Sendable {
             return nil
         }
 
-        return error == nil && converted.frameLength > 0 ? converted : nil
+        if let error {
+            DiagnosticLog.shared.log("[AudioRecorder] Sample rate conversion error: \(error.localizedDescription)")
+            return nil
+        }
+        return converted.frameLength > 0 ? converted : nil
     }
 }

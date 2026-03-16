@@ -185,11 +185,23 @@ struct Transcribe: AsyncParsableCommand {
             sysRecordingPath = basePath.appendingPathExtension("sys.caf")
 
             let micRecorder = AudioRecorder()
-            try micRecorder.start(filePath: micRecordingPath!)
+            do {
+                try micRecorder.start(filePath: micRecordingPath!)
+            } catch {
+                try? FileManager.default.removeItem(at: micRecordingPath!)
+                throw error
+            }
             capture.micRecorder = micRecorder
 
             let sysRecorder = AudioRecorder()
-            try sysRecorder.start(filePath: sysRecordingPath!)
+            do {
+                try sysRecorder.start(filePath: sysRecordingPath!)
+            } catch {
+                micRecorder.stop()
+                try? FileManager.default.removeItem(at: micRecordingPath!)
+                try? FileManager.default.removeItem(at: sysRecordingPath!)
+                throw error
+            }
             capture.systemRecorder = sysRecorder
         } else {
             micRecordingPath = nil
@@ -247,6 +259,13 @@ struct Transcribe: AsyncParsableCommand {
         }
 
         terminal.printInfo("Recording... Press Ctrl+C to stop.\n")
+
+        // Ensure cleanup on any exit path (throw, natural return)
+        defer {
+            capture.micRecorder?.stop()
+            capture.systemRecorder?.stop()
+            writer.flush()
+        }
 
         // Run transcription until stopped
         try await engine.run()

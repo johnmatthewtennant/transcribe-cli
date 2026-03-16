@@ -43,8 +43,12 @@ final class MarkdownWriter: @unchecked Sendable {
 
             // Write source audio reference for file transcription mode
             if let sourceAudioFilename {
-                let sourceLine = "*Source: \(sourceAudioFilename)*\n\n"
-                fileHandle.write(sourceLine.data(using: .utf8)!)
+                // Sanitize: strip control chars/newlines to prevent formatting injection
+                let sanitized = sourceAudioFilename.filter { !$0.isNewline && ($0.asciiValue.map { $0 >= 32 } ?? true) }
+                if !sanitized.isEmpty {
+                    let sourceLine = "*Source: \(sanitized)*\n\n"
+                    fileHandle.write(sourceLine.data(using: .utf8)!)
+                }
             }
         }
     }

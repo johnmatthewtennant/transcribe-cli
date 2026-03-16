@@ -133,6 +133,24 @@ struct AudioRecorderTests {
         #expect(readBuffer.floatChannelData![0][0] != 999.0)
     }
 
+    @Test func sampleRateConversion() throws {
+        defer { cleanup() }
+        let path = tmpDir.appendingPathComponent("resample.caf")
+        // Recorder outputs at 48kHz, input at 16kHz
+        let recorder = AudioRecorder(sampleRate: 48000)
+        try recorder.start(filePath: path)
+
+        let inputBuffer = makeMonoFloat32Buffer(sampleRate: 16000, frameCount: 1600)
+        recorder.write(buffer: inputBuffer)
+        recorder.stop()
+
+        let readFile = try AVAudioFile(forReading: path)
+        #expect(readFile.fileFormat.sampleRate == 48000)
+        #expect(readFile.fileFormat.channelCount == 1)
+        // 1600 frames at 16kHz -> ~4800 frames at 48kHz (3x ratio)
+        #expect(readFile.length >= 4700 && readFile.length <= 4900)
+    }
+
     @Test func stereoInputDownmixedToMono() throws {
         defer { cleanup() }
         let path = tmpDir.appendingPathComponent("stereo.caf")
