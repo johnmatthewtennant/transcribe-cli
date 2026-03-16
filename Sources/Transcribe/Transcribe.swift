@@ -214,12 +214,9 @@ struct Transcribe: AsyncParsableCommand {
         do {
             try await capture.start()
         } catch {
-            // Stop any partially started capture (stops callbacks)
             await capture.stop()
-            // Drain and close recorders
             capture.micRecorder?.stop()
             capture.systemRecorder?.stop()
-            // Remove empty recording files
             if let micPath = micRecordingPath {
                 try? FileManager.default.removeItem(at: micPath)
             }
