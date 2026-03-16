@@ -104,6 +104,39 @@ struct MarkdownWriterTests {
         #expect(content.contains(timestampPattern))
     }
 
+    @Test func sourceAudioFilenameInHeader() throws {
+        defer { cleanup() }
+        let path = tmpDir.appendingPathComponent("source.md")
+        let writer = try MarkdownWriter(
+            filePath: path,
+            title: "File Transcription",
+            isResume: false,
+            micSpeaker: "Speaker",
+            systemSpeaker: "Speaker",
+            sourceAudioFilename: "meeting.m4a"
+        )
+        writer.flush()
+
+        let content = try String(contentsOf: path, encoding: .utf8)
+        #expect(content.contains("*Source: meeting.m4a*"))
+    }
+
+    @Test func noSourceAudioFilenameByDefault() throws {
+        defer { cleanup() }
+        let path = tmpDir.appendingPathComponent("nosource.md")
+        let writer = try MarkdownWriter(
+            filePath: path,
+            title: "Live Recording",
+            isResume: false,
+            micSpeaker: "You",
+            systemSpeaker: "Remote"
+        )
+        writer.flush()
+
+        let content = try String(contentsOf: path, encoding: .utf8)
+        #expect(!content.contains("*Source:"))
+    }
+
     @Test func wordCountTracking() throws {
         defer { cleanup() }
         let path = tmpDir.appendingPathComponent("wordcount.md")
@@ -143,5 +176,28 @@ struct MarkdownWriterTests {
         #expect(content.contains("**Remote**"))
         #expect(content.contains("First line"))
         #expect(content.contains("Second line"))
+    }
+
+    @Test func sourceAudioFilenameControlCharsSanitized() throws {
+        defer { cleanup() }
+        let path = tmpDir.appendingPathComponent("sanitized.md")
+        let writer = try MarkdownWriter(
+            filePath: path,
+            title: "Test",
+            isResume: false,
+            micSpeaker: "Speaker",
+            systemSpeaker: "Speaker",
+            sourceAudioFilename: "meeting\n# Injected Header\n.m4a"
+        )
+        writer.flush()
+
+        let content = try String(contentsOf: path, encoding: .utf8)
+        // Newlines should be stripped, so "# Injected Header" won't be on its own line
+        // (which would render as a markdown heading)
+        let lines = content.components(separatedBy: "\n")
+        let hasInjectedHeading = lines.contains { $0.hasPrefix("# Injected") }
+        #expect(!hasInjectedHeading)
+        // The sanitized filename is all on one line
+        #expect(content.contains("*Source: meeting# Injected Header.m4a*"))
     }
 }

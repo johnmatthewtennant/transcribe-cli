@@ -28,6 +28,9 @@ struct Transcribe: AsyncParsableCommand {
     @Option(name: .long, help: "Path to an audio file (m4a, wav, mp3, caf, etc.) to transcribe offline.")
     var file: String?
 
+    @Flag(name: .long, help: "Skip saving the audio recording.")
+    var noRecording = false
+
     mutating func run() async throws {
         let transcriptsDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Documents/transcripts")
@@ -80,7 +83,8 @@ struct Transcribe: AsyncParsableCommand {
             title: fileTitle,
             isResume: isResume,
             micSpeaker: speakerName,
-            systemSpeaker: speakerName
+            systemSpeaker: speakerName,
+            sourceAudioFilename: fileURL.lastPathComponent
         )
 
         // Set up file audio source
@@ -170,7 +174,57 @@ struct Transcribe: AsyncParsableCommand {
             printPermissionError(error)
             Foundation.exit(1)
         }
-        try await capture.start()
+
+        // Set up recording
+        let micRecordingPath: URL?
+        let sysRecordingPath: URL?
+
+        if !noRecording && !isResume {
+            let basePath = filePath.deletingPathExtension()
+            micRecordingPath = basePath.appendingPathExtension("mic.caf")
+            sysRecordingPath = basePath.appendingPathExtension("sys.caf")
+
+            let micRecorder = AudioRecorder()
+            do {
+                try micRecorder.start(filePath: micRecordingPath!)
+            } catch {
+                try? FileManager.default.removeItem(at: micRecordingPath!)
+                throw error
+            }
+            capture.micRecorder = micRecorder
+
+            let sysRecorder = AudioRecorder()
+            do {
+                try sysRecorder.start(filePath: sysRecordingPath!)
+            } catch {
+                micRecorder.stop()
+                try? FileManager.default.removeItem(at: micRecordingPath!)
+                try? FileManager.default.removeItem(at: sysRecordingPath!)
+                throw error
+            }
+            capture.systemRecorder = sysRecorder
+        } else {
+            micRecordingPath = nil
+            sysRecordingPath = nil
+            if isResume {
+                terminal.printInfo("Recording skipped (resume mode)")
+            }
+        }
+
+        do {
+            try await capture.start()
+        } catch {
+            await capture.stop()
+            capture.micRecorder?.stop()
+            capture.systemRecorder?.stop()
+            if let micPath = micRecordingPath {
+                try? FileManager.default.removeItem(at: micPath)
+            }
+            if let sysPath = sysRecordingPath {
+                try? FileManager.default.removeItem(at: sysPath)
+            }
+            throw error
+        }
 
         // Set up transcription engine
         let engine = try await TranscriptionEngine(
@@ -183,21 +237,32 @@ struct Transcribe: AsyncParsableCommand {
 
         // Handle Ctrl+C
         let startTime = Date()
+        let recordingPaths = [micRecordingPath, sysRecordingPath].compactMap { $0 }
         setupSignalHandler {
             Task {
                 await engine.stop()
-                capture.stop()
+                await capture.stop()
+                capture.micRecorder?.stop()
+                capture.systemRecorder?.stop()
                 writer.flush()
                 terminal.printSummary(
                     duration: Date().timeIntervalSince(startTime),
                     wordCount: writer.wordCount,
-                    filePath: filePath
+                    filePath: filePath,
+                    recordingPaths: recordingPaths
                 )
                 Foundation.exit(0)
             }
         }
 
         terminal.printInfo("Recording... Press Ctrl+C to stop.\n")
+
+        // Ensure cleanup on any exit path (throw, natural return)
+        defer {
+            capture.micRecorder?.stop()
+            capture.systemRecorder?.stop()
+            writer.flush()
+        }
 
         // Run transcription until stopped
         try await engine.run()
@@ -208,12 +273,12 @@ struct Transcribe: AsyncParsableCommand {
 
 func parseSpeakerNames(_ raw: String?) -> (String, String) {
     guard let raw, !raw.isEmpty else {
-        return ("You", "Remote")
+        return ("Local", "Remote")
     }
     let parts = raw.split(separator: ",", maxSplits: 1).map {
         sanitizeSpeakerName(String($0.trimmingCharacters(in: .whitespaces)))
     }
-    let mic = parts.first ?? "You"
+    let mic = parts.first ?? "Local"
     let system = parts.count > 1 ? parts[1] : "Remote"
     return (mic, system)
 }

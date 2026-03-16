@@ -49,13 +49,13 @@ struct SpeakerNameSanitizationTests {
 struct ParseSpeakerNamesTests {
     @Test func nilInput() {
         let (mic, sys) = parseSpeakerNames(nil)
-        #expect(mic == "You")
+        #expect(mic == "Local")
         #expect(sys == "Remote")
     }
 
     @Test func emptyInput() {
         let (mic, sys) = parseSpeakerNames("")
-        #expect(mic == "You")
+        #expect(mic == "Local")
         #expect(sys == "Remote")
     }
 

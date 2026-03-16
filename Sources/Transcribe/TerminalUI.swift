@@ -56,7 +56,7 @@ final class TerminalUI: Sendable {
     }
 
     /// Print session summary on exit.
-    func printSummary(duration: TimeInterval, wordCount: Int, filePath: URL) {
+    func printSummary(duration: TimeInterval, wordCount: Int, filePath: URL, recordingPaths: [URL] = []) {
         lock.lock()
         defer { lock.unlock() }
         print("\(clearLine)")
@@ -64,6 +64,9 @@ final class TerminalUI: Sendable {
         print("  Duration:   \(formatDuration(duration))")
         print("  Words:      \(wordCount)")
         print("  Transcript: \(filePath.path)")
+        for path in recordingPaths {
+            print("  Recording:  \(path.path)")
+        }
     }
 
     private func formatDuration(_ seconds: TimeInterval) -> String {
