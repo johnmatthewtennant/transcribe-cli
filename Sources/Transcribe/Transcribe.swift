@@ -164,7 +164,12 @@ struct Transcribe: AsyncParsableCommand {
         // Set up audio capture
         terminal.printInfo("Starting audio capture...")
         let capture = AudioCapture()
-        try await capture.checkPermissions()
+        do {
+            try await capture.checkPermissions()
+        } catch let error as TranscribeError {
+            printPermissionError(error)
+            Foundation.exit(1)
+        }
         try await capture.start()
 
         // Set up transcription engine
@@ -318,6 +323,60 @@ func listRecordings(in dir: URL) throws {
 
 /// Retained globally so the dispatch source isn't deallocated.
 private nonisolated(unsafe) var _signalSource: DispatchSourceSignal?
+
+/// Print a detailed permission error with troubleshooting steps to stderr.
+func printPermissionError(_ error: TranscribeError) {
+    switch error {
+    case .permissionsDenied(let errors):
+        for err in errors {
+            printPermissionError(err)
+        }
+    case .micPermissionDenied:
+        fputs("""
+        Error: Microphone access denied.
+
+        Your terminal app needs permission to access the Microphone.
+
+        1. Grant permission — macOS should prompt automatically on first use.
+           If it doesn't, try running this app again.
+
+        2. If previously denied, reset the permission first, then re-run:
+           tccutil reset Microphone <bundle-id>
+
+           Find your terminal's bundle ID:
+           osascript -e 'id of app "iTerm"'  (replace iTerm with your terminal app name)
+
+        3. Check System Settings > Privacy & Security > Microphone
+           and ensure your terminal app is allowed.
+
+        Then retry: transcribe
+
+        """, stderr)
+    case .screenRecordingPermissionDenied:
+        fputs("""
+        Error: Screen Recording access denied (needed for system audio capture).
+
+        Your terminal app needs Screen Recording permission to capture system audio.
+
+        1. Grant permission — macOS should prompt automatically on first use.
+           If it doesn't, try running this app again.
+
+        2. If previously denied, reset the permission first, then re-run:
+           tccutil reset ScreenCapture <bundle-id>
+
+           Find your terminal's bundle ID:
+           osascript -e 'id of app "iTerm"'  (replace iTerm with your terminal app name)
+
+        3. Check System Settings > Privacy & Security > Screen Recording
+           and ensure your terminal app is allowed. You may need to restart the terminal after granting access.
+
+        Then retry: transcribe
+
+        """, stderr)
+    default:
+        fputs("Error: \(error.localizedDescription)\n", stderr)
+    }
+}
 
 func setupSignalHandler(_ handler: @escaping () -> Void) {
     signal(SIGINT, SIG_IGN)
