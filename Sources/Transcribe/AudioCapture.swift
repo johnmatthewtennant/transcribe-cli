@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import CoreMedia
 import Foundation
 import os
@@ -35,6 +36,14 @@ final class AudioCapture: NSObject, Sendable {
     nonisolated(unsafe) private var audioEngine: AVAudioEngine?
     nonisolated(unsafe) private var scStream: SCStream?
     nonisolated(unsafe) private var streamDelegate: SystemAudioDelegate?
+
+    /// Optional recorders for saving captured audio to separate mono CAF files.
+    nonisolated(unsafe) var micRecorder: AudioRecorder?
+    nonisolated(unsafe) var systemRecorder: AudioRecorder?
+
+    /// Lock serializing all mic engine operations (create, restart, stop).
+    private let micLock = NSLock()
+    nonisolated(unsafe) private var isStopped = false
 
     /// Origin host time for mic stream (set when first buffer arrives)
     nonisolated(unsafe) var micOriginHostTime: UInt64 = 0
@@ -95,17 +104,45 @@ final class AudioCapture: NSObject, Sendable {
         try await startSystemAudioCapture()
     }
 
-    func stop() {
-        audioEngine?.stop()
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        scStream?.stopCapture { _ in }
+    func stop() async {
+        stopMic()
+
+        if let scStream {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                scStream.stopCapture { _ in
+                    continuation.resume()
+                }
+            }
+        }
         _micContinuation.finish()
         _systemContinuation.finish()
+    }
+
+    /// Synchronously stop the mic engine. Safe to call from async context.
+    private func stopMic() {
+        micLock.lock()
+        isStopped = true
+        if let engine = audioEngine {
+            NotificationCenter.default.removeObserver(
+                self, name: .AVAudioEngineConfigurationChange, object: engine
+            )
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
+        audioEngine = nil
+        micLock.unlock()
     }
 
     // MARK: - Mic Capture (AVAudioEngine)
 
     private func startMicCapture() throws {
+        micLock.lock()
+        defer { micLock.unlock() }
+        try startMicCaptureLocked()
+    }
+
+    /// Assumes caller holds `micLock`. Sets up engine, tap, and notification observer.
+    private func startMicCaptureLocked() throws {
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
@@ -114,21 +151,77 @@ final class AudioCapture: NSObject, Sendable {
             throw TranscribeError.noMicrophoneAvailable
         }
 
-        var isFirst = true
+        // Phase 1: Log which audio input device is being used
+        if let deviceID = getDefaultInputDeviceID(),
+           let name = getDeviceName(deviceID: deviceID),
+           let uid = getDeviceUID(deviceID: deviceID) {
+            let truncatedUID = String(uid.prefix(8))
+            DiagnosticLog.shared.log("[Mic] Using input device: \(name) (UID: \(truncatedUID)..., ID: \(deviceID))")
+        } else {
+            DiagnosticLog.shared.log("[Mic] WARNING: Could not determine input device")
+        }
+
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
             guard let self else { return }
             let hostTime = mach_continuous_time()
-            if isFirst {
+            // Only set origin host time once per session (not on restart)
+            if self.micOriginHostTime == 0 {
                 self.micOriginHostTime = hostTime
-                isFirst = false
             }
             let timestamped = TimestampedBuffer(buffer: buffer, hostTime: hostTime)
             self._micContinuation.yield(timestamped)
+            self.micRecorder?.write(buffer: buffer)
         }
 
         engine.prepare()
         try engine.start()
+
+        // Phase 3: Listen for device configuration changes on this engine
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleConfigurationChange(_:)),
+            name: .AVAudioEngineConfigurationChange,
+            object: engine
+        )
+
         self.audioEngine = engine
+    }
+
+    // MARK: - Device Change Handling
+
+    @objc private func handleConfigurationChange(_ notification: Notification) {
+        micLock.lock()
+        defer { micLock.unlock() }
+
+        guard !isStopped else { return }
+
+        DiagnosticLog.shared.log("[Mic] AVAudioEngine configuration change detected — restarting mic capture")
+
+        // Log new default device info
+        if let newID = getDefaultInputDeviceID(), let newName = getDeviceName(deviceID: newID) {
+            let uid = getDeviceUID(deviceID: newID).map { String($0.prefix(8)) } ?? "?"
+            DiagnosticLog.shared.log("[Mic] New default input device: \(newName) (UID: \(uid)...)")
+        }
+
+        // Tear down old tap and engine
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+
+        // Remove observer for old engine before creating new one
+        if let oldEngine = audioEngine {
+            NotificationCenter.default.removeObserver(
+                self, name: .AVAudioEngineConfigurationChange, object: oldEngine
+            )
+        }
+
+        // Restart — call locked variant since we already hold micLock
+        do {
+            try startMicCaptureLocked()
+            DiagnosticLog.shared.log("[Mic] Successfully restarted mic capture after device change")
+        } catch {
+            DiagnosticLog.shared.log("[Mic] ERROR: Failed to restart mic capture: \(error.localizedDescription)")
+            // Don't finish the continuation — the device might come back
+        }
     }
 
     // MARK: - System Audio Capture (ScreenCaptureKit)
@@ -157,7 +250,8 @@ final class AudioCapture: NSObject, Sendable {
             continuation: _systemContinuation,
             onFirstBuffer: { [weak self] hostTime in
                 self?.systemOriginHostTime = hostTime
-            }
+            },
+            recorder: systemRecorder
         )
         self.streamDelegate = delegate
 
@@ -174,10 +268,16 @@ private final class SystemAudioDelegate: NSObject, SCStreamOutput, @unchecked Se
     private let continuation: AsyncStream<TimestampedBuffer>.Continuation
     private let onFirstBuffer: (UInt64) -> Void
     private var isFirst = true
+    private let recorder: AudioRecorder?
 
-    init(continuation: AsyncStream<TimestampedBuffer>.Continuation, onFirstBuffer: @escaping (UInt64) -> Void) {
+    init(
+        continuation: AsyncStream<TimestampedBuffer>.Continuation,
+        onFirstBuffer: @escaping (UInt64) -> Void,
+        recorder: AudioRecorder? = nil
+    ) {
         self.continuation = continuation
         self.onFirstBuffer = onFirstBuffer
+        self.recorder = recorder
         super.init()
     }
 
@@ -201,6 +301,7 @@ private final class SystemAudioDelegate: NSObject, SCStreamOutput, @unchecked Se
 
         let timestamped = TimestampedBuffer(buffer: pcmBuffer, hostTime: hostTime)
         continuation.yield(timestamped)
+        recorder?.write(buffer: pcmBuffer)
     }
 }
 
