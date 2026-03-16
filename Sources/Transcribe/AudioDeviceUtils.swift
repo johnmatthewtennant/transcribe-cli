@@ -32,12 +32,11 @@ func getDeviceName(deviceID: AudioDeviceID) -> String? {
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain
     )
-    var size: UInt32 = 0
-    guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr else { return nil }
-    let data = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<CFString>.alignment)
-    defer { data.deallocate() }
-    guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, data) == noErr else { return nil }
-    return data.load(as: CFString.self) as String
+    var name: Unmanaged<CFString>?
+    var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+    guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &name) == noErr,
+          let name else { return nil }
+    return name.takeRetainedValue() as String
 }
 
 /// Get the UID string of an audio device (stable identifier).
@@ -47,12 +46,11 @@ func getDeviceUID(deviceID: AudioDeviceID) -> String? {
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain
     )
-    var size: UInt32 = 0
-    guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr else { return nil }
-    let data = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<CFString>.alignment)
-    defer { data.deallocate() }
-    guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, data) == noErr else { return nil }
-    return data.load(as: CFString.self) as String
+    var uid: Unmanaged<CFString>?
+    var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+    guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &uid) == noErr,
+          let uid else { return nil }
+    return uid.takeRetainedValue() as String
 }
 
 /// List all audio input devices (ID, name, UID).

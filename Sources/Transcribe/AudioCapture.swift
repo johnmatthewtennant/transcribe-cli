@@ -109,7 +109,10 @@ final class AudioCapture: NSObject, Sendable {
 
         if let scStream {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                scStream.stopCapture { _ in
+                scStream.stopCapture { error in
+                    if let error {
+                        DiagnosticLog.shared.log("[SystemAudio] stopCapture error: \(error.localizedDescription)")
+                    }
                     continuation.resume()
                 }
             }
