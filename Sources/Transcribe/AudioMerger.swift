@@ -40,8 +40,8 @@ enum AudioMerger {
         }
 
         let sampleRate = micFormat.sampleRate
-        let micLength = AVAudioFrameCount(micFile.length)
-        let sysLength = AVAudioFrameCount(sysFile.length)
+        let micLength = micFile.length   // AVAudioFramePosition (Int64)
+        let sysLength = sysFile.length
         let maxFrames = max(micLength, sysLength)
 
         guard maxFrames > 0 else {
@@ -81,14 +81,14 @@ enum AudioMerger {
             throw TranscribeError.captureError("Cannot allocate merge buffers")
         }
 
-        var framesWritten: AVAudioFrameCount = 0
+        var framesWritten: AVAudioFramePosition = 0
         while framesWritten < maxFrames {
             let remaining = maxFrames - framesWritten
-            let thisChunk = min(chunkSize, remaining)
+            let thisChunk = AVAudioFrameCount(min(AVAudioFramePosition(chunkSize), remaining))
 
             var micActual: AVAudioFrameCount = 0
             if framesWritten < micLength {
-                let micAvail = min(thisChunk, micLength - framesWritten)
+                let micAvail = AVAudioFrameCount(min(AVAudioFramePosition(thisChunk), micLength - framesWritten))
                 micChunk.frameLength = 0
                 try micFile.read(into: micChunk, frameCount: micAvail)
                 micActual = micChunk.frameLength
@@ -96,7 +96,7 @@ enum AudioMerger {
 
             var sysActual: AVAudioFrameCount = 0
             if framesWritten < sysLength {
-                let sysAvail = min(thisChunk, sysLength - framesWritten)
+                let sysAvail = AVAudioFrameCount(min(AVAudioFramePosition(thisChunk), sysLength - framesWritten))
                 sysChunk.frameLength = 0
                 try sysFile.read(into: sysChunk, frameCount: sysAvail)
                 sysActual = sysChunk.frameLength
@@ -124,7 +124,7 @@ enum AudioMerger {
             }
 
             try outputFile.write(from: stereoChunk)
-            framesWritten += thisChunk
+            framesWritten += AVAudioFramePosition(thisChunk)
         }
 
         try FileManager.default.setAttributes(

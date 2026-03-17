@@ -440,9 +440,14 @@ func listRecordings(in dir: URL) throws {
 /// Retained globally so the dispatch source isn't deallocated.
 private nonisolated(unsafe) var _signalSource: DispatchSourceSignal?
 
-/// Retained globally so the dispatch source isn't deallocated.
-private nonisolated(unsafe) var _stdinSource: DispatchSourceRead?
-private nonisolated(unsafe) var _savedTermios: termios?
+/// Terminal state protected by a lock to prevent data races between
+/// the signal handler (main queue), Escape key handler (global queue),
+/// cancel handler, and atexit handler.
+private struct TerminalState {
+    var stdinSource: DispatchSourceRead?
+    var savedTermios: termios?
+}
+private let _terminalLock = OSAllocatedUnfairLock(initialState: TerminalState())
 
 /// Print a detailed permission error with troubleshooting steps to stderr.
 func printPermissionError(_ error: TranscribeError) {
@@ -513,8 +518,8 @@ func setupEscapeKeyHandler(_ handler: @escaping () -> Void) {
     guard isatty(STDIN_FILENO) != 0 else { return }
 
     var oldTermios = termios()
-    tcgetattr(STDIN_FILENO, &oldTermios)
-    _savedTermios = oldTermios
+    guard tcgetattr(STDIN_FILENO, &oldTermios) == 0 else { return }
+    let savedOldTermios = oldTermios
 
     var raw = oldTermios
     raw.c_lflag &= ~UInt(ICANON | ECHO)
@@ -524,7 +529,11 @@ func setupEscapeKeyHandler(_ handler: @escaping () -> Void) {
         base[Int(VMIN)] = 1
         base[Int(VTIME)] = 0
     }
-    tcsetattr(STDIN_FILENO, TCSANOW, &raw)
+    guard tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0 else { return }
+
+    _terminalLock.withLock { state in
+        state.savedTermios = savedOldTermios
+    }
 
     atexit {
         restoreTerminal()
@@ -543,16 +552,20 @@ func setupEscapeKeyHandler(_ handler: @escaping () -> Void) {
         restoreTerminal()
     }
     source.resume()
-    _stdinSource = source
+    _terminalLock.withLock { state in
+        state.stdinSource = source
+    }
 }
 
 func restoreTerminal() {
-    if var saved = _savedTermios {
-        tcsetattr(STDIN_FILENO, TCSANOW, &saved)
-        _savedTermios = nil
+    _terminalLock.withLock { state in
+        if var saved = state.savedTermios {
+            tcsetattr(STDIN_FILENO, TCSANOW, &saved)
+            state.savedTermios = nil
+        }
+        state.stdinSource?.cancel()
+        state.stdinSource = nil
     }
-    _stdinSource?.cancel()
-    _stdinSource = nil
 }
 
 @available(macOS 26.0, *)
