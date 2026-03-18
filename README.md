@@ -1,11 +1,11 @@
-# swift-transcribe
+# transcribe-cli
 
 On-device speech-to-text for macOS using Apple's SpeechAnalyzer (Neural Engine). Records mic + system audio with speaker attribution. Also transcribes audio files.
 
 ## Install
 
 ```bash
-brew install johnmatthewtennant/tap/swift-transcribe
+brew install johnmatthewtennant/tap/transcribe-cli
 transcribe --install-skill
 ```
 
