@@ -4,6 +4,7 @@ import Foundation
 final class TerminalUI: Sendable {
     private let micSpeaker: String
     private let systemSpeaker: String
+    private let showInterim: Bool
 
     // ANSI color codes
     private let green = "\u{001B}[32m"
@@ -16,9 +17,10 @@ final class TerminalUI: Sendable {
     // Serialization lock for terminal output
     private let lock = NSLock()
 
-    init(micSpeaker: String, systemSpeaker: String) {
+    init(micSpeaker: String, systemSpeaker: String, showInterim: Bool = false) {
         self.micSpeaker = micSpeaker
         self.systemSpeaker = systemSpeaker
+        self.showInterim = showInterim
     }
 
     /// Print an info message.
@@ -37,6 +39,7 @@ final class TerminalUI: Sendable {
 
     /// Show a volatile (partial) result — overwrites the current line.
     func showVolatile(speaker: String, text: String) {
+        guard showInterim else { return }
         lock.lock()
         defer { lock.unlock() }
         let color = speaker == micSpeaker ? green : blue

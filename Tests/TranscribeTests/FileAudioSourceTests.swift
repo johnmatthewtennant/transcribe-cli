@@ -263,4 +263,16 @@ struct FileTranscriptionArgTests {
         #expect(command.file == "/path/to/audio.wav")
         #expect(command.speakers == "Alice,Bob")
     }
+
+    @Test func showInterimFlagIsParsed() throws {
+        guard #available(macOS 26.0, *) else { return }
+        let command = try Transcribe.parse(["--show-interim"])
+        #expect(command.showInterim == true)
+    }
+
+    @Test func showInterimDefaultsToFalse() throws {
+        guard #available(macOS 26.0, *) else { return }
+        let command = try Transcribe.parse([])
+        #expect(command.showInterim == false)
+    }
 }
