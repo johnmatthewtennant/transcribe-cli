@@ -1,10 +1,24 @@
+---
+name: transcribe-audio
+description: Transcribe audio on macOS — live mic + system audio recording or pre-recorded audio files. Use when transcribing meetings, recordings, or audio files to text.
+allowed-tools:
+  - Bash(brew list *)
+  - Bash(brew outdated *)
+  - Bash(transcribe *)
+metadata:
+  author: jtennant
+  version: "0.1.0"
+---
+
 # swift-transcribe
 
 On-device speech-to-text CLI for macOS using Apple's SpeechAnalyzer. Can transcribe live or pre-recorded audio. Prints a live transcript to the terminal and saves to a markdown file.
 
 ## Prerequisite check (auto-generated)
 
-!`brew list swift-transcribe &>/dev/null || brew install johnmatthewtennant/tap/swift-transcribe &>/dev/null; brew upgrade johnmatthewtennant/tap/swift-transcribe &>/dev/null; brew list --versions swift-transcribe || echo "**STOP**: swift-transcribe is not installed. See SETUP.md."; for d in ~/.agents/skills/transcribe-audio ~/.claude/skills/transcribe-audio; do mkdir -p "$d"; curl -sL "https://raw.githubusercontent.com/johnmatthewtennant/swift-transcribe/master/.agents/skills/transcribe-audio/SKILL.md" -o "$d/SKILL.md"; done`
+!`brew list --versions swift-transcribe || echo "STOP: swift-transcribe is not installed. Run: brew install johnmatthewtennant/tap/swift-transcribe. See SETUP.md."`
+
+!`brew outdated swift-transcribe 2>/dev/null || echo "STOP: swift-transcribe is outdated. Run: brew upgrade swift-transcribe. See SETUP.md."`
 
 ## Basic usage
 

@@ -1,0 +1,91 @@
+name: Auto Release & Homebrew Bump
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  release:
+    runs-on: macos-latest
+    if: "!contains(github.event.head_commit.message, '[skip-release]')"
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if already tagged
+        id: check
+        run: |
+          if git describe --exact-match HEAD 2>/dev/null; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get next version
+        if: steps.check.outputs.skip != 'true'
+        id: version
+        run: |
+          LATEST=$(git tag -l 'v*' | sort -V | tail -1 | sed 's/v//')
+          if [ -z "$LATEST" ]; then
+            NEXT="0.1.0"
+          else
+            MAJOR=$(echo $LATEST | cut -d. -f1)
+            MINOR=$(echo $LATEST | cut -d. -f2)
+            PATCH=$(echo $LATEST | cut -d. -f3)
+            NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
+          fi
+          echo "version=$NEXT" >> $GITHUB_OUTPUT
+          echo "tag=v$NEXT" >> $GITHUB_OUTPUT
+
+      - name: Build binary
+        if: steps.check.outputs.skip != 'true'
+        run: make
+
+      - name: Create tag and release
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git tag ${{ steps.version.outputs.tag }}
+          git push origin ${{ steps.version.outputs.tag }}
+          gh release create ${{ steps.version.outputs.tag }} \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes
+
+      - name: Update Homebrew formula
+        if: steps.check.outputs.skip != 'true'
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::error::TAP_TOKEN secret is not set. Cannot update Homebrew formula."
+            exit 1
+          fi
+
+          TAG=${{ steps.version.outputs.tag }}
+
+          # Wait for tarball to be available
+          for i in 1 2 3 4 5; do
+            HTTP_CODE=$(curl -sL -o /tmp/release.tar.gz -w '%{http_code}' \
+              "https://github.com/johnmatthewtennant/swift-transcribe/archive/refs/tags/${TAG}.tar.gz")
+            if [ "$HTTP_CODE" = "200" ]; then break; fi
+            echo "Tarball not ready (HTTP $HTTP_CODE), retrying in 5s..."
+            sleep 5
+          done
+
+          SHA=$(shasum -a 256 /tmp/release.tar.gz | cut -d' ' -f1)
+
+          git clone https://x-access-token:${TAP_TOKEN}@github.com/johnmatthewtennant/homebrew-tap.git /tmp/homebrew-tap
+          cd /tmp/homebrew-tap
+
+          sed -i '' "s|url \".*\"|url \"https://github.com/johnmatthewtennant/swift-transcribe/archive/refs/tags/${TAG}.tar.gz\"|" Formula/swift-transcribe.rb
+          sed -i '' "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/swift-transcribe.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/swift-transcribe.rb
+          git commit -m "swift-transcribe: bump to ${TAG}"
+          git push
