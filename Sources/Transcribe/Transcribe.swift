@@ -22,6 +22,9 @@ struct Transcribe: AsyncParsableCommand {
     @Flag(name: .long, help: "List past recordings.")
     var list = false
 
+    @Flag(name: .customLong("install-skill"), help: "Install the Claude Code skill (symlinks to ~/.claude/skills/ and ~/.agents/skills/).")
+    var installSkill = false
+
     @Option(name: .long, help: "Comma-separated speaker names (e.g. \"Jack,Jeanne\"). First is mic, second is system audio.")
     var speakers: String?
 
@@ -37,6 +40,11 @@ struct Transcribe: AsyncParsableCommand {
 
         if list {
             try listRecordings(in: transcriptsDir)
+            return
+        }
+
+        if installSkill {
+            try installSkillFiles()
             return
         }
 
@@ -383,6 +391,62 @@ func listRecordings(in dir: URL) throws {
         let date = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
             .map { dateFmt.string(from: $0) } ?? "unknown date"
         print("  \(file.lastPathComponent)  (\(date))")
+    }
+}
+
+// MARK: - Install Skill
+
+func installSkillFiles() throws {
+    let fm = FileManager.default
+
+    // Find SKILL.md relative to the running binary
+    let execURL = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+    let binDir = execURL.deletingLastPathComponent()
+    let skillRelPath = ".agents/skills/transcribe-audio/SKILL.md"
+    var candidates: [URL] = []
+    // Walk up from binary directory looking for the skill file
+    var dir = binDir
+    for _ in 0..<5 {
+        candidates.append(dir.appendingPathComponent(skillRelPath))
+        dir = dir.deletingLastPathComponent()
+    }
+
+    guard let sourcePath = candidates.first(where: { fm.fileExists(atPath: $0.path) }) else {
+        let searched = candidates.map(\.path).joined(separator: "\n  ")
+        throw ValidationError("Could not find SKILL.md relative to binary at \(execURL.path)\nSearched:\n  \(searched)")
+    }
+
+    let home = fm.homeDirectoryForCurrentUser
+    let targets = [
+        home.appendingPathComponent(".claude/skills/transcribe-audio"),
+        home.appendingPathComponent(".agents/skills/transcribe-audio"),
+    ]
+
+    for dir in targets {
+        let dirPath = dir.path
+        let targetPath = dir.appendingPathComponent("SKILL.md").path
+
+        // Remove existing symlink/file at the directory path if it's not a real directory
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: dirPath, isDirectory: &isDir) {
+            if !isDir.boolValue {
+                try fm.removeItem(atPath: dirPath)
+            }
+        } else {
+            // Path doesn't exist but may be a broken symlink
+            let attrs = try? fm.attributesOfItem(atPath: dirPath)
+            if attrs != nil || (try? fm.destinationOfSymbolicLink(atPath: dirPath)) != nil {
+                try fm.removeItem(atPath: dirPath)
+            }
+        }
+
+        try fm.createDirectory(atPath: dirPath, withIntermediateDirectories: true)
+
+        if fm.fileExists(atPath: targetPath) {
+            try fm.removeItem(atPath: targetPath)
+        }
+        try fm.createSymbolicLink(atPath: targetPath, withDestinationPath: sourcePath.path)
+        print("Installed: \(targetPath) -> \(sourcePath.path)")
     }
 }
 
