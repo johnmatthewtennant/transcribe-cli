@@ -253,7 +253,7 @@ struct Transcribe: AsyncParsableCommand {
         let startTime = Date()
         let recordingPaths = [micRecordingPath, sysRecordingPath].compactMap { $0 }
         let deleteRaw = self.deleteRawRecordings
-        let hasRecording = !noRecording && !isResume
+        let hasRecording = saveRecording && !isResume
 
         let shutdown: @Sendable () -> Void = {
             // Thread-safe guard against duplicate shutdown (atomic check-and-set)
