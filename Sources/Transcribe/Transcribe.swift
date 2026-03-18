@@ -32,8 +32,11 @@ struct Transcribe: AsyncParsableCommand {
     @Option(name: .long, help: "Path to an audio file (m4a, wav, mp3, caf, etc.) to transcribe offline.")
     var file: String?
 
-    @Flag(name: .long, help: "Skip saving the audio recording.")
-    var noRecording = false
+    @Flag(name: .long, help: "Save the audio recording alongside the transcript.")
+    var saveRecording = false
+
+    @Flag(name: .long, help: "Show in-progress speech recognition text at the bottom of the terminal. Ignored when stdout is not a TTY.")
+    var showInterim = false
 
     @Flag(name: .long, help: "Delete original mono CAF files after successful merge to M4A.")
     var deleteRawRecordings = false
@@ -47,15 +50,17 @@ struct Transcribe: AsyncParsableCommand {
             return
         }
 
+        let effectiveShowInterim = showInterim && isatty(STDOUT_FILENO) != 0
+
         if let file {
-            try await runFileTranscription(file: file, transcriptsDir: transcriptsDir)
+            try await runFileTranscription(file: file, transcriptsDir: transcriptsDir, effectiveShowInterim: effectiveShowInterim)
         } else {
-            try await runLiveRecording(transcriptsDir: transcriptsDir)
+            try await runLiveRecording(transcriptsDir: transcriptsDir, effectiveShowInterim: effectiveShowInterim)
         }
     }
 
     /// Transcribe an existing audio file.
-    private func runFileTranscription(file: String, transcriptsDir: URL) async throws {
+    private func runFileTranscription(file: String, transcriptsDir: URL, effectiveShowInterim: Bool) async throws {
         let fileURL = URL(fileURLWithPath: (file as NSString).expandingTildeInPath)
             .standardizedFileURL
 
@@ -63,7 +68,7 @@ struct Transcribe: AsyncParsableCommand {
         let fileTitle = sanitizeTitle(title) ?? fileURL.deletingPathExtension().lastPathComponent
         let speakerName = speakers.flatMap { $0.split(separator: ",").first.map { sanitizeSpeakerName(String($0.trimmingCharacters(in: .whitespaces))) } } ?? "Speaker"
 
-        let terminal = TerminalUI(micSpeaker: speakerName, systemSpeaker: speakerName)
+        let terminal = TerminalUI(micSpeaker: speakerName, systemSpeaker: speakerName, showInterim: effectiveShowInterim)
         terminal.printInfo("Transcribing file: \(fileURL.path)")
 
         // Ensure speech model is available
@@ -102,7 +107,8 @@ struct Transcribe: AsyncParsableCommand {
             fileSource: fileSource,
             writer: writer,
             terminal: terminal,
-            speaker: speakerName
+            speaker: speakerName,
+            showInterim: effectiveShowInterim
         )
 
         let startTime = Date()
@@ -136,7 +142,7 @@ struct Transcribe: AsyncParsableCommand {
     }
 
     /// Run live mic + system audio recording and transcription.
-    private func runLiveRecording(transcriptsDir: URL) async throws {
+    private func runLiveRecording(transcriptsDir: URL, effectiveShowInterim: Bool) async throws {
         // Parse speaker names
         let speakerNames = parseSpeakerNames(speakers)
         let micSpeaker = speakerNames.0
@@ -151,7 +157,7 @@ struct Transcribe: AsyncParsableCommand {
             resume: resumeTarget
         )
 
-        let terminal = TerminalUI(micSpeaker: micSpeaker, systemSpeaker: systemSpeaker)
+        let terminal = TerminalUI(micSpeaker: micSpeaker, systemSpeaker: systemSpeaker, showInterim: effectiveShowInterim)
 
         if isResume {
             terminal.printInfo("Resuming: \(filePath.path)")
@@ -186,7 +192,7 @@ struct Transcribe: AsyncParsableCommand {
         let micRecordingPath: URL?
         let sysRecordingPath: URL?
 
-        if !noRecording && !isResume {
+        if saveRecording && !isResume {
             let basePath = filePath.deletingPathExtension()
             micRecordingPath = basePath.appendingPathExtension("mic.caf")
             sysRecordingPath = basePath.appendingPathExtension("sys.caf")
@@ -239,7 +245,8 @@ struct Transcribe: AsyncParsableCommand {
             writer: writer,
             terminal: terminal,
             micSpeaker: micSpeaker,
-            systemSpeaker: systemSpeaker
+            systemSpeaker: systemSpeaker,
+            showInterim: effectiveShowInterim
         )
 
         // Build shutdown closure (shared by Ctrl+C and Escape)
