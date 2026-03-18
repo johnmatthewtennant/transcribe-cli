@@ -22,6 +22,7 @@ actor TranscriptionEngine {
     private let terminal: TerminalUI
     private let micSpeaker: String
     private let systemSpeaker: String
+    private let showInterim: Bool
 
     private var isStopped = false
     private var reorderBuffer: ReorderBuffer
@@ -32,7 +33,8 @@ actor TranscriptionEngine {
         writer: MarkdownWriter,
         terminal: TerminalUI,
         micSpeaker: String,
-        systemSpeaker: String
+        systemSpeaker: String,
+        showInterim: Bool = false
     ) async throws {
         self.audioCapture = audioCapture
         self.fileSource = nil
@@ -40,6 +42,7 @@ actor TranscriptionEngine {
         self.terminal = terminal
         self.micSpeaker = micSpeaker
         self.systemSpeaker = systemSpeaker
+        self.showInterim = showInterim
         // Temporary placeholder — will be replaced after self is fully initialized
         self.reorderBuffer = ReorderBuffer { _ in }
         // Now replace with real callback that captures self
@@ -54,7 +57,8 @@ actor TranscriptionEngine {
         fileSource: FileAudioSource,
         writer: MarkdownWriter,
         terminal: TerminalUI,
-        speaker: String
+        speaker: String,
+        showInterim: Bool = false
     ) async throws {
         self.audioCapture = nil
         self.fileSource = fileSource
@@ -62,6 +66,7 @@ actor TranscriptionEngine {
         self.terminal = terminal
         self.micSpeaker = speaker
         self.systemSpeaker = speaker
+        self.showInterim = showInterim
         self.reorderBuffer = ReorderBuffer { _ in }
         self.reorderBuffer = ReorderBuffer { [writer, terminal] event in
             writer.writeLine(speaker: event.speaker, text: event.text, wallClockTime: event.wallClockTime)
@@ -80,17 +85,19 @@ actor TranscriptionEngine {
 
     /// Run dual-channel live transcription.
     private func runLiveTranscription(audioCapture: AudioCapture) async throws {
-        // Create transcribers with volatile results and time range attributes
+        let reportingOptions: Set<SpeechTranscriber.ReportingOption> = showInterim ? [.volatileResults] : []
+
+        // Create transcribers with time range attributes (and optionally volatile results)
         let micTranscriber = SpeechTranscriber(
             locale: Locale(identifier: "en-US"),
             transcriptionOptions: [],
-            reportingOptions: [],
+            reportingOptions: reportingOptions,
             attributeOptions: [.audioTimeRange]
         )
         let systemTranscriber = SpeechTranscriber(
             locale: Locale(identifier: "en-US"),
             transcriptionOptions: [],
-            reportingOptions: [],
+            reportingOptions: reportingOptions,
             attributeOptions: [.audioTimeRange]
         )
 
@@ -144,10 +151,12 @@ actor TranscriptionEngine {
 
     /// Run single-channel file transcription.
     private func runFileTranscription(fileSource: FileAudioSource) async throws {
+        let reportingOptions: Set<SpeechTranscriber.ReportingOption> = showInterim ? [.volatileResults] : []
+
         let transcriber = SpeechTranscriber(
             locale: Locale(identifier: "en-US"),
             transcriptionOptions: [],
-            reportingOptions: [],
+            reportingOptions: reportingOptions,
             attributeOptions: [.audioTimeRange]
         )
 
@@ -203,6 +212,15 @@ actor TranscriptionEngine {
                 let text = String(result.text.characters)
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
 
+                if !result.isFinal {
+                    // Interim results: display-only, skip timestamp/event construction
+                    let sanitized = text.filter { $0 >= " " }
+                    terminal.showVolatile(speaker: speaker, text: sanitized)
+                    continue
+                }
+
+                // Final result: compute wall-clock, create event, add to reorder buffer
+
                 // Read originHostTime lazily — it's set by the audio callback on first buffer
                 let originHostTime = getOriginHostTime()
                 if originHostTime == 0 {
@@ -221,10 +239,8 @@ actor TranscriptionEngine {
                     isFinal: result.isFinal
                 )
 
-                if result.isFinal {
-                    finalCount += 1
-                    reorderBuffer.add(event)
-                }
+                finalCount += 1
+                reorderBuffer.add(event)
             }
         } catch {
             if !isStopped {

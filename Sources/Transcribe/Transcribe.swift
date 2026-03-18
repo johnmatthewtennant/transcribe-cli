@@ -1,6 +1,10 @@
 import ArgumentParser
 import Foundation
+import os
 import Speech
+
+/// Thread-safe shutdown reentrancy guard.
+private let _shutdownLock = OSAllocatedUnfairLock(initialState: false)
 
 @available(macOS 26.0, *)
 @main
@@ -34,6 +38,12 @@ struct Transcribe: AsyncParsableCommand {
     @Flag(name: .long, help: "Save the audio recording alongside the transcript.")
     var saveRecording = false
 
+    @Flag(name: .long, help: "Show in-progress speech recognition text at the bottom of the terminal. Ignored when stdout is not a TTY.")
+    var showInterim = false
+
+    @Flag(name: .long, help: "Delete original mono CAF files after successful merge to M4A.")
+    var deleteRawRecordings = false
+
     mutating func run() async throws {
         let transcriptsDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Documents/transcripts")
@@ -48,15 +58,17 @@ struct Transcribe: AsyncParsableCommand {
             return
         }
 
+        let effectiveShowInterim = showInterim && isatty(STDOUT_FILENO) != 0
+
         if let file {
-            try await runFileTranscription(file: file, transcriptsDir: transcriptsDir)
+            try await runFileTranscription(file: file, transcriptsDir: transcriptsDir, effectiveShowInterim: effectiveShowInterim)
         } else {
-            try await runLiveRecording(transcriptsDir: transcriptsDir)
+            try await runLiveRecording(transcriptsDir: transcriptsDir, effectiveShowInterim: effectiveShowInterim)
         }
     }
 
     /// Transcribe an existing audio file.
-    private func runFileTranscription(file: String, transcriptsDir: URL) async throws {
+    private func runFileTranscription(file: String, transcriptsDir: URL, effectiveShowInterim: Bool) async throws {
         let fileURL = URL(fileURLWithPath: (file as NSString).expandingTildeInPath)
             .standardizedFileURL
 
@@ -64,7 +76,7 @@ struct Transcribe: AsyncParsableCommand {
         let fileTitle = sanitizeTitle(title) ?? fileURL.deletingPathExtension().lastPathComponent
         let speakerName = speakers.flatMap { $0.split(separator: ",").first.map { sanitizeSpeakerName(String($0.trimmingCharacters(in: .whitespaces))) } } ?? "Speaker"
 
-        let terminal = TerminalUI(micSpeaker: speakerName, systemSpeaker: speakerName)
+        let terminal = TerminalUI(micSpeaker: speakerName, systemSpeaker: speakerName, showInterim: effectiveShowInterim)
         terminal.printInfo("Transcribing file: \(fileURL.path)")
 
         // Ensure speech model is available
@@ -103,7 +115,8 @@ struct Transcribe: AsyncParsableCommand {
             fileSource: fileSource,
             writer: writer,
             terminal: terminal,
-            speaker: speakerName
+            speaker: speakerName,
+            showInterim: effectiveShowInterim
         )
 
         let startTime = Date()
@@ -137,7 +150,7 @@ struct Transcribe: AsyncParsableCommand {
     }
 
     /// Run live mic + system audio recording and transcription.
-    private func runLiveRecording(transcriptsDir: URL) async throws {
+    private func runLiveRecording(transcriptsDir: URL, effectiveShowInterim: Bool) async throws {
         // Parse speaker names
         let speakerNames = parseSpeakerNames(speakers)
         let micSpeaker = speakerNames.0
@@ -152,7 +165,7 @@ struct Transcribe: AsyncParsableCommand {
             resume: resumeTarget
         )
 
-        let terminal = TerminalUI(micSpeaker: micSpeaker, systemSpeaker: systemSpeaker)
+        let terminal = TerminalUI(micSpeaker: micSpeaker, systemSpeaker: systemSpeaker, showInterim: effectiveShowInterim)
 
         if isResume {
             terminal.printInfo("Resuming: \(filePath.path)")
@@ -240,36 +253,81 @@ struct Transcribe: AsyncParsableCommand {
             writer: writer,
             terminal: terminal,
             micSpeaker: micSpeaker,
-            systemSpeaker: systemSpeaker
+            systemSpeaker: systemSpeaker,
+            showInterim: effectiveShowInterim
         )
 
-        // Handle Ctrl+C
+        // Build shutdown closure (shared by Ctrl+C and Escape)
         let startTime = Date()
         let recordingPaths = [micRecordingPath, sysRecordingPath].compactMap { $0 }
-        setupSignalHandler {
+        let deleteRaw = self.deleteRawRecordings
+        let hasRecording = saveRecording && !isResume
+
+        let shutdown: @Sendable () -> Void = {
+            // Thread-safe guard against duplicate shutdown (atomic check-and-set)
+            let alreadyShuttingDown = _shutdownLock.withLock { isShuttingDown -> Bool in
+                if isShuttingDown { return true }
+                isShuttingDown = true
+                return false
+            }
+            guard !alreadyShuttingDown else { return }
+
             Task {
                 await engine.stop()
                 await capture.stop()
                 capture.micRecorder?.stop()
                 capture.systemRecorder?.stop()
                 writer.flush()
+
+                // Merge and compress recordings
+                var finalRecordingPaths = recordingPaths
+                if hasRecording, let micPath = micRecordingPath, let sysPath = sysRecordingPath {
+                    let m4aPath = filePath.deletingPathExtension().appendingPathExtension("m4a")
+                    terminal.printInfo("Merging recordings to \(m4aPath.lastPathComponent)...")
+                    do {
+                        try AudioMerger.mergeToStereoAAC(
+                            micPath: micPath,
+                            sysPath: sysPath,
+                            outputPath: m4aPath
+                        )
+                        finalRecordingPaths = [m4aPath] + (deleteRaw ? [] : recordingPaths)
+
+                        // Delete originals only if --delete-raw-recordings
+                        if deleteRaw {
+                            try? FileManager.default.removeItem(at: micPath)
+                            try? FileManager.default.removeItem(at: sysPath)
+                        }
+                    } catch {
+                        terminal.printError("Failed to merge recordings: \(error.localizedDescription)")
+                        terminal.printInfo("Raw recordings preserved at original paths.")
+                    }
+                }
+
                 terminal.printSummary(
                     duration: Date().timeIntervalSince(startTime),
                     wordCount: writer.wordCount,
                     filePath: filePath,
-                    recordingPaths: recordingPaths
+                    recordingPaths: finalRecordingPaths
                 )
+                restoreTerminal()
                 Foundation.exit(0)
             }
         }
 
-        terminal.printInfo("Recording... Press Ctrl+C to stop.\n")
+        // Handle Ctrl+C
+        setupSignalHandler { shutdown() }
+
+        // Handle Escape key
+        setupEscapeKeyHandler { shutdown() }
+
+        terminal.printInfo("Recording... Press Escape or Ctrl+C to stop.\n")
 
         // Ensure cleanup on any exit path (throw, natural return)
         defer {
             capture.micRecorder?.stop()
             capture.systemRecorder?.stop()
             writer.flush()
+            restoreTerminal()
         }
 
         // Run transcription until stopped
@@ -453,6 +511,15 @@ func installSkillFiles() throws {
 /// Retained globally so the dispatch source isn't deallocated.
 private nonisolated(unsafe) var _signalSource: DispatchSourceSignal?
 
+/// Terminal state protected by a lock to prevent data races between
+/// the signal handler (main queue), Escape key handler (global queue),
+/// cancel handler, and atexit handler.
+private struct TerminalState {
+    var stdinSource: DispatchSourceRead?
+    var savedTermios: termios?
+}
+private let _terminalLock = OSAllocatedUnfairLock(initialState: TerminalState())
+
 /// Print a detailed permission error with troubleshooting steps to stderr.
 func printPermissionError(_ error: TranscribeError) {
     switch error {
@@ -515,13 +582,68 @@ func setupSignalHandler(_ handler: @escaping () -> Void) {
     _signalSource = source
 }
 
+/// Set up raw-mode stdin listener that triggers handler on Escape key.
+/// No-op if stdin is not a terminal (e.g., piped input).
+/// Restores terminal settings when handler fires or on normal exit.
+func setupEscapeKeyHandler(_ handler: @escaping () -> Void) {
+    guard isatty(STDIN_FILENO) != 0 else { return }
+
+    var oldTermios = termios()
+    guard tcgetattr(STDIN_FILENO, &oldTermios) == 0 else { return }
+    let savedOldTermios = oldTermios
+
+    var raw = oldTermios
+    raw.c_lflag &= ~UInt(ICANON | ECHO)
+    withUnsafeMutablePointer(to: &raw.c_cc) { ptr in
+        let base = UnsafeMutableRawPointer(ptr)
+            .assumingMemoryBound(to: cc_t.self)
+        base[Int(VMIN)] = 1
+        base[Int(VTIME)] = 0
+    }
+    guard tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0 else { return }
+
+    _terminalLock.withLock { state in
+        state.savedTermios = savedOldTermios
+    }
+
+    atexit {
+        restoreTerminal()
+    }
+
+    let source = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO, queue: .global(qos: .userInitiated))
+    source.setEventHandler {
+        var buf = [UInt8](repeating: 0, count: 1)
+        let n = read(STDIN_FILENO, &buf, 1)
+        if n == 1 && buf[0] == 0x1B {
+            restoreTerminal()
+            handler()
+        }
+    }
+    source.setCancelHandler {
+        restoreTerminal()
+    }
+    source.resume()
+    _terminalLock.withLock { state in
+        state.stdinSource = source
+    }
+}
+
+func restoreTerminal() {
+    _terminalLock.withLock { state in
+        if var saved = state.savedTermios {
+            tcsetattr(STDIN_FILENO, TCSANOW, &saved)
+            state.savedTermios = nil
+        }
+        state.stdinSource?.cancel()
+        state.stdinSource = nil
+    }
+}
+
 @available(macOS 26.0, *)
 func ensureSpeechModel(terminal: TerminalUI) async throws {
-    // Check if speech transcription locale is available
     let locales = await SpeechTranscriber.installedLocales
     let englishAvailable = locales.contains { $0.identifier.hasPrefix("en") }
     if !englishAvailable {
-        // Check if it's at least supported (can be downloaded)
         let supported = await SpeechTranscriber.supportedLocales
         if supported.contains(where: { $0.identifier.hasPrefix("en") }) {
             terminal.printInfo("English speech model not yet installed. It will be downloaded on first use.")
