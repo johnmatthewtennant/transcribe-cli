@@ -28,8 +28,8 @@ struct Transcribe: AsyncParsableCommand {
     @Option(name: .long, help: "Path to an audio file (m4a, wav, mp3, caf, etc.) to transcribe offline.")
     var file: String?
 
-    @Flag(name: .long, help: "Skip saving the audio recording.")
-    var noRecording = false
+    @Flag(name: .long, help: "Save the audio recording alongside the transcript.")
+    var saveRecording = false
 
     @Flag(name: .long, help: "Show in-progress speech recognition text at the bottom of the terminal. Ignored when stdout is not a TTY.")
     var showInterim = false
@@ -185,7 +185,7 @@ struct Transcribe: AsyncParsableCommand {
         let micRecordingPath: URL?
         let sysRecordingPath: URL?
 
-        if !noRecording && !isResume {
+        if saveRecording && !isResume {
             let basePath = filePath.deletingPathExtension()
             micRecordingPath = basePath.appendingPathExtension("mic.caf")
             sysRecordingPath = basePath.appendingPathExtension("sys.caf")
