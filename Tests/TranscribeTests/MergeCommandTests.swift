@@ -3,7 +3,7 @@ import Testing
 
 @testable import transcribe
 
-@Suite("MergeCommand")
+@Suite("MergeCommand", .serialized)
 struct MergeCommandTests {
 
     private func createMonoCAF(at url: URL, sampleRate: Double = 48000, durationSeconds: Double = 0.5) throws {
@@ -190,104 +190,44 @@ struct MergeCommandTests {
         }
     }
 
-    @Test("Partial output cleaned up on merge failure")
+    @Test("Cleanup removes partial output when merge function throws")
     @available(macOS 26.0, *)
-    func testPartialOutputCleanedUp() throws {
-        let dir = try tempDir()
-        defer { try? FileManager.default.removeItem(at: dir) }
-
-        // Create two valid mono CAFs with mismatched sample rates.
-        // AudioMerger validates mono first (passes), then checks sample rates
-        // AFTER creating the output file via FileManager.createFile.
-        // However, the current implementation validates before file creation,
-        // so we use a different approach: create valid inputs that pass all
-        // validation but fail during AVAudioFile write.
-        //
-        // We create a read-only subdirectory at the output path, causing
-        // AudioMerger.mergeToStereo to create the placeholder file (via
-        // FileManager.createFile which fails silently for directories), then
-        // AVAudioFile(forWriting:) throws, and MergeCommand's cleanup runs.
-        //
-        // Alternative: Since the validation error for stereo input happens
-        // before file creation, we test cleanup indirectly by verifying that
-        // no stale output exists after any error path through MergeCommand.
-
-        let micPath = dir.appendingPathComponent("fail.mic.caf")
-        let sysPath = dir.appendingPathComponent("fail.sys.caf")
-        let outPath = dir.appendingPathComponent("fail.wav")
-
-        // Create mic as mono CAF but sys as stereo (will cause merge to fail)
-        try createMonoCAF(at: micPath)
-
-        let frameCount: AVAudioFrameCount = 48000
-        guard let stereoFormat = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2),
-              let buffer = AVAudioPCMBuffer(pcmFormat: stereoFormat, frameCapacity: frameCount) else {
-            throw TranscribeError.captureError("Cannot create stereo buffer")
-        }
-        buffer.frameLength = frameCount
-        let sysFile = try AVAudioFile(forWriting: sysPath, settings: stereoFormat.settings)
-        try sysFile.write(from: buffer)
-
-        // Use MergeCommand which wraps mergeToStereo with cleanup
-        let cmd = try MergeCommand.parse([micPath.path, sysPath.path, "-o", outPath.path])
-        #expect(throws: (any Error).self) {
-            try cmd.run()
-        }
-
-        // Output file should NOT exist after failed merge
-        #expect(!FileManager.default.fileExists(atPath: outPath.path),
-                "Output file should be cleaned up after merge failure")
-    }
-
-    @Test("Cleanup removes file created by AudioMerger on late failure")
-    @available(macOS 26.0, *)
-    func testCleanupOnLateFailure() throws {
+    func testCleanupOnMergeFailure() throws {
         let dir = try tempDir()
         defer {
-            // Restore permissions before cleanup
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o755],
-                ofItemAtPath: dir.path
-            )
+            MergeCommand._mergeOverride = nil
             try? FileManager.default.removeItem(at: dir)
         }
 
-        let micPath = dir.appendingPathComponent("late.mic.caf")
-        let sysPath = dir.appendingPathComponent("late.sys.caf")
-        let outPath = dir.appendingPathComponent("late.wav")
+        let micPath = dir.appendingPathComponent("cleanup.mic.caf")
+        let sysPath = dir.appendingPathComponent("cleanup.sys.caf")
+        let outPath = dir.appendingPathComponent("cleanup.wav")
 
         try createMonoCAF(at: micPath)
         try createMonoCAF(at: sysPath)
 
-        // First, verify a normal merge works
-        try AudioMerger.mergeToStereoWAV(micPath: micPath, sysPath: sysPath, outputPath: outPath)
-        #expect(FileManager.default.fileExists(atPath: outPath.path))
+        // Inject a merge function that creates the output file then throws,
+        // simulating a failure after AudioMerger has already created the file.
+        struct MergeFailure: Error {}
+        MergeCommand._mergeOverride = { _, _, outputPath, _ in
+            // Simulate AudioMerger creating the file before failing
+            FileManager.default.createFile(atPath: outputPath.path, contents: Data([0x00]))
+            throw MergeFailure()
+        }
 
-        // Clean up for next test
-        try FileManager.default.removeItem(at: outPath)
-
-        // Now make the output directory read-only so AVAudioFile(forWriting:)
-        // fails AFTER FileManager.createFile runs (createFile may succeed
-        // because it was initiated before the chmod, or fail silently).
-        // Either way, MergeCommand's cleanup should ensure no stale output.
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o555],
-            ofItemAtPath: dir.path
-        )
+        // Verify the output file doesn't exist yet
+        #expect(!FileManager.default.fileExists(atPath: outPath.path))
 
         let cmd = try MergeCommand.parse([micPath.path, sysPath.path, "-o", outPath.path])
         #expect(throws: (any Error).self) {
             try cmd.run()
         }
 
-        // Restore permissions to check and clean up
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o755],
-            ofItemAtPath: dir.path
-        )
+        // Reset before assertions to avoid affecting other tests
+        MergeCommand._mergeOverride = nil
 
-        // Output file should not exist (either never created or cleaned up)
+        // The cleanup in MergeCommand.run() should have removed the partial output
         #expect(!FileManager.default.fileExists(atPath: outPath.path),
-                "Output file should not exist after failed merge")
+                "Partial output file should be removed after merge failure")
     }
 }

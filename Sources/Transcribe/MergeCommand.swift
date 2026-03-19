@@ -34,13 +34,17 @@ struct MergeCommand: ParsableCommand {
     @Flag(name: .long, help: "Delete the original CAF files after successful merge.")
     var deleteOriginals = false
 
+    /// Overridable merge function for testing. Defaults to AudioMerger.mergeToStereo.
+    /// Set to a custom closure in tests to simulate failures after file creation.
+    nonisolated(unsafe) static var _mergeOverride: ((URL, URL, URL, AudioMerger.OutputFormat) throws -> Void)?
+
     func validate() throws {
         let validFormats = ["wav", "m4a"]
         guard validFormats.contains(format.lowercased()) else {
             throw ValidationError("Unsupported format '\(format)'. Use 'wav' or 'm4a'.")
         }
 
-        // Warn if output extension doesn't match format
+        // Reject output extension that doesn't match format
         if let output {
             let outputURL = URL(fileURLWithPath: output)
             let ext = outputURL.pathExtension.lowercased()
@@ -95,12 +99,13 @@ struct MergeCommand: ParsableCommand {
         fputs("Output: \(outputURL.path)\n", stderr)
 
         do {
-            try AudioMerger.mergeToStereo(
-                micPath: micURL,
-                sysPath: sysURL,
-                outputPath: outputURL,
-                format: outputFormat
-            )
+            if let override = Self._mergeOverride {
+                try override(micURL, sysURL, outputURL, outputFormat)
+            } else {
+                try AudioMerger.mergeToStereo(
+                    micPath: micURL, sysPath: sysURL, outputPath: outputURL, format: outputFormat
+                )
+            }
         } catch {
             // Clean up partial output file on failure
             try? fm.removeItem(at: outputURL)
