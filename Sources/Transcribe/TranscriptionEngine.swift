@@ -432,27 +432,28 @@ actor TranscriptionEngine {
 
     /// Run dual-channel live transcription using SFSpeechRecognizer.
     private func runLiveTranscription(audioCapture: AudioCapture) async throws {
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
-              recognizer.isAvailable else {
+        let locale = Locale(identifier: "en-US")
+        guard let testRecognizer = SFSpeechRecognizer(locale: locale),
+              testRecognizer.isAvailable else {
             throw TranscribeError.modelUnavailable("Speech recognizer not available. Check that speech recognition is enabled in System Settings.")
         }
 
-        // Run mic and system transcription concurrently
+        // Run mic and system transcription concurrently (each creates its own recognizer)
         await withTaskGroup(of: Void.self) { group in
-            group.addTask { [self] in
+            group.addTask {
                 await self.runSFRecognition(
-                    recognizer: recognizer,
+                    locale: locale,
                     stream: audioCapture.micStream,
                     speaker: self.micSpeaker,
-                    getOriginHostTime: { audioCapture.micOriginHostTime }
+                    originHostTime: audioCapture.micOriginHostTime
                 )
             }
-            group.addTask { [self] in
+            group.addTask {
                 await self.runSFRecognition(
-                    recognizer: recognizer,
+                    locale: locale,
                     stream: audioCapture.systemStream,
                     speaker: self.systemSpeaker,
-                    getOriginHostTime: { audioCapture.systemOriginHostTime }
+                    originHostTime: audioCapture.systemOriginHostTime
                 )
             }
 
@@ -470,8 +471,9 @@ actor TranscriptionEngine {
 
     /// Run single-channel file transcription using SFSpeechRecognizer.
     private func runFileTranscription(fileSource: FileAudioSource) async throws {
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
-              recognizer.isAvailable else {
+        let locale = Locale(identifier: "en-US")
+        guard let testRecognizer = SFSpeechRecognizer(locale: locale),
+              testRecognizer.isAvailable else {
             throw TranscribeError.modelUnavailable("Speech recognizer not available.")
         }
 
@@ -479,12 +481,12 @@ actor TranscriptionEngine {
             group.addTask {
                 try? await fileSource.start()
             }
-            group.addTask { [self] in
+            group.addTask {
                 await self.runSFRecognition(
-                    recognizer: recognizer,
+                    locale: locale,
                     stream: fileSource.stream,
                     speaker: self.micSpeaker,
-                    getOriginHostTime: { fileSource.originHostTime }
+                    originHostTime: fileSource.originHostTime
                 )
             }
             group.addTask {
@@ -499,23 +501,23 @@ actor TranscriptionEngine {
     }
 
     /// Run SFSpeechRecognizer-based recognition on an audio buffer stream.
-    private func runSFRecognition(
-        recognizer: SFSpeechRecognizer,
+    private nonisolated func runSFRecognition(
+        locale: Locale,
         stream: AsyncStream<TimestampedBuffer>,
         speaker: String,
-        getOriginHostTime: @Sendable () -> UInt64
+        originHostTime: UInt64
     ) async {
-        let audioEngine = AVAudioEngine()
+        guard let recognizer = SFSpeechRecognizer(locale: locale) else { return }
         let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = showInterim
+        request.shouldReportPartialResults = await showInterim
 
-        var finalCount = 0
-        var previousFinalText = ""
+        nonisolated(unsafe) var finalCount = 0
+        nonisolated(unsafe) var previousFinalText = ""
 
-        let task = recognizer.recognitionTask(with: request) { [self] result, error in
+        let task = recognizer.recognitionTask(with: request) { result, error in
             guard let result else {
-                if let error, !self._isStopped_unsafeSyncCheck() {
-                    self._printError_unsafeSync("Transcription error for \(speaker): \(error.localizedDescription)")
+                if let error {
+                    DiagnosticLog.shared.log("[\(speaker)] Recognition error: \(error.localizedDescription)")
                 }
                 return
             }
@@ -524,7 +526,6 @@ actor TranscriptionEngine {
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
             if result.isFinal {
-                let originHostTime = getOriginHostTime()
                 let wallClock = originHostTime + UInt64(Date().timeIntervalSince1970 * 1_000_000_000) % 1_000_000_000
 
                 let event = TranscriptEvent(
@@ -536,7 +537,7 @@ actor TranscriptionEngine {
                 finalCount += 1
                 Task { await self.addToBuffer(event) }
                 previousFinalText = text
-            } else if self.showInterim {
+            } else {
                 // Show only the new portion beyond what was already finalized
                 let newText = String(text.dropFirst(previousFinalText.count))
                     .trimmingCharacters(in: .whitespaces)
@@ -549,7 +550,8 @@ actor TranscriptionEngine {
 
         // Feed audio buffers to the recognition request
         for await timestamped in stream {
-            guard !isStopped else { break }
+            let stopped = await isStopped
+            guard !stopped else { break }
             request.append(timestamped.buffer)
         }
 
@@ -569,17 +571,6 @@ actor TranscriptionEngine {
 
     private func showVolatileText(speaker: String, text: String) {
         terminal.showVolatile(speaker: speaker, text: text)
-    }
-
-    // These are intentionally non-isolated for use in the recognition callback.
-    // The callback runs on an arbitrary queue and cannot await actor methods.
-    nonisolated private func _isStopped_unsafeSyncCheck() -> Bool {
-        // This is a benign race — worst case we process one extra result
-        return false
-    }
-
-    nonisolated private func _printError_unsafeSync(_ message: String) {
-        terminal.printError(message)
     }
 
     private func periodicFlush() {
