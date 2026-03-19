@@ -55,6 +55,10 @@ final class TerminalUI: Sendable {
         let color = speaker == micSpeaker ? green : blue
         // Clear volatile line first, then print finalized
         print("\(clearLine)\(bold)\(color)\(speaker)\(reset): \(text)")
+        if showInterim {
+            // Blank line buffer: volatile text overwrites this instead of the finalized line
+            print("")
+        }
         fflush(stdout)
     }
 
