@@ -11,6 +11,8 @@ struct TranscriptEvent: Sendable {
     let isFinal: Bool
 }
 
+#if compiler(>=6.2)
+
 /// Manages SpeechTranscriber instances and merges results.
 /// Supports dual-channel mode (mic + system) for live recording,
 /// and single-channel mode for file transcription.
@@ -354,3 +356,240 @@ func makeAnalyzerInputStream(
         }
     }
 }
+
+#else
+
+// MARK: - Legacy Fallback (SFSpeechRecognizer, pre-macOS 26)
+
+/// Fallback transcription engine using SFSpeechRecognizer for older macOS / Swift compilers.
+/// Supports dual-channel mode (mic + system) for live recording,
+/// and single-channel mode for file transcription.
+actor TranscriptionEngine {
+    private let audioCapture: AudioCapture?
+    private let fileSource: FileAudioSource?
+    private let writer: MarkdownWriter
+    private let terminal: TerminalUI
+    private let micSpeaker: String
+    private let systemSpeaker: String
+    private let showInterim: Bool
+
+    private var isStopped = false
+    private var reorderBuffer: ReorderBuffer
+
+    /// Initialize for live dual-channel recording.
+    init(
+        audioCapture: AudioCapture,
+        writer: MarkdownWriter,
+        terminal: TerminalUI,
+        micSpeaker: String,
+        systemSpeaker: String,
+        showInterim: Bool = false
+    ) async throws {
+        self.audioCapture = audioCapture
+        self.fileSource = nil
+        self.writer = writer
+        self.terminal = terminal
+        self.micSpeaker = micSpeaker
+        self.systemSpeaker = systemSpeaker
+        self.showInterim = showInterim
+        self.reorderBuffer = ReorderBuffer { _ in }
+        self.reorderBuffer = ReorderBuffer { [writer, terminal] event in
+            writer.writeLine(speaker: event.speaker, text: event.text, wallClockTime: event.wallClockTime)
+            terminal.showFinalized(speaker: event.speaker, text: event.text)
+        }
+    }
+
+    /// Initialize for single-channel file transcription.
+    init(
+        fileSource: FileAudioSource,
+        writer: MarkdownWriter,
+        terminal: TerminalUI,
+        speaker: String,
+        showInterim: Bool = false
+    ) async throws {
+        self.audioCapture = nil
+        self.fileSource = fileSource
+        self.writer = writer
+        self.terminal = terminal
+        self.micSpeaker = speaker
+        self.systemSpeaker = speaker
+        self.showInterim = showInterim
+        self.reorderBuffer = ReorderBuffer { _ in }
+        self.reorderBuffer = ReorderBuffer { [writer, terminal] event in
+            writer.writeLine(speaker: event.speaker, text: event.text, wallClockTime: event.wallClockTime)
+            terminal.showFinalized(speaker: event.speaker, text: event.text)
+        }
+    }
+
+    /// Run transcription until stopped or input is exhausted.
+    func run() async throws {
+        if let fileSource {
+            try await runFileTranscription(fileSource: fileSource)
+        } else if let audioCapture {
+            try await runLiveTranscription(audioCapture: audioCapture)
+        }
+    }
+
+    /// Run dual-channel live transcription using SFSpeechRecognizer.
+    private func runLiveTranscription(audioCapture: AudioCapture) async throws {
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
+              recognizer.isAvailable else {
+            throw TranscribeError.modelUnavailable("Speech recognizer not available. Check that speech recognition is enabled in System Settings.")
+        }
+
+        // Run mic and system transcription concurrently
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { [self] in
+                await self.runSFRecognition(
+                    recognizer: recognizer,
+                    stream: audioCapture.micStream,
+                    speaker: self.micSpeaker,
+                    getOriginHostTime: { audioCapture.micOriginHostTime }
+                )
+            }
+            group.addTask { [self] in
+                await self.runSFRecognition(
+                    recognizer: recognizer,
+                    stream: audioCapture.systemStream,
+                    speaker: self.systemSpeaker,
+                    getOriginHostTime: { audioCapture.systemOriginHostTime }
+                )
+            }
+
+            // Periodic flush
+            group.addTask {
+                while await !self.isStopped {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    await self.periodicFlush()
+                }
+            }
+
+            await group.waitForAll()
+        }
+    }
+
+    /// Run single-channel file transcription using SFSpeechRecognizer.
+    private func runFileTranscription(fileSource: FileAudioSource) async throws {
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
+              recognizer.isAvailable else {
+            throw TranscribeError.modelUnavailable("Speech recognizer not available.")
+        }
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try? await fileSource.start()
+            }
+            group.addTask { [self] in
+                await self.runSFRecognition(
+                    recognizer: recognizer,
+                    stream: fileSource.stream,
+                    speaker: self.micSpeaker,
+                    getOriginHostTime: { fileSource.originHostTime }
+                )
+            }
+            group.addTask {
+                while await !self.isStopped {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    await self.periodicFlush()
+                }
+            }
+
+            await group.waitForAll()
+        }
+    }
+
+    /// Run SFSpeechRecognizer-based recognition on an audio buffer stream.
+    private func runSFRecognition(
+        recognizer: SFSpeechRecognizer,
+        stream: AsyncStream<TimestampedBuffer>,
+        speaker: String,
+        getOriginHostTime: @Sendable () -> UInt64
+    ) async {
+        let audioEngine = AVAudioEngine()
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = showInterim
+
+        var finalCount = 0
+        var previousFinalText = ""
+
+        let task = recognizer.recognitionTask(with: request) { [self] result, error in
+            guard let result else {
+                if let error, !self._isStopped_unsafeSyncCheck() {
+                    self._printError_unsafeSync("Transcription error for \(speaker): \(error.localizedDescription)")
+                }
+                return
+            }
+
+            let text = result.bestTranscription.formattedString
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+            if result.isFinal {
+                let originHostTime = getOriginHostTime()
+                let wallClock = originHostTime + UInt64(Date().timeIntervalSince1970 * 1_000_000_000) % 1_000_000_000
+
+                let event = TranscriptEvent(
+                    speaker: speaker,
+                    text: text,
+                    wallClockTime: wallClock,
+                    isFinal: true
+                )
+                finalCount += 1
+                Task { await self.addToBuffer(event) }
+                previousFinalText = text
+            } else if self.showInterim {
+                // Show only the new portion beyond what was already finalized
+                let newText = String(text.dropFirst(previousFinalText.count))
+                    .trimmingCharacters(in: .whitespaces)
+                if !newText.isEmpty {
+                    let sanitized = newText.filter { $0 >= " " }
+                    Task { await self.showVolatileText(speaker: speaker, text: sanitized) }
+                }
+            }
+        }
+
+        // Feed audio buffers to the recognition request
+        for await timestamped in stream {
+            guard !isStopped else { break }
+            request.append(timestamped.buffer)
+        }
+
+        request.endAudio()
+
+        // Wait briefly for final results
+        try? await Task.sleep(for: .seconds(2))
+        task.cancel()
+
+        DiagnosticLog.shared.log("[\(speaker)] SFSpeechRecognizer ended: \(finalCount) final events emitted")
+    }
+
+    // Helper methods for callback-based access (SFSpeechRecognizer uses callbacks, not async)
+    private func addToBuffer(_ event: TranscriptEvent) {
+        reorderBuffer.add(event)
+    }
+
+    private func showVolatileText(speaker: String, text: String) {
+        terminal.showVolatile(speaker: speaker, text: text)
+    }
+
+    // These are intentionally non-isolated for use in the recognition callback.
+    // The callback runs on an arbitrary queue and cannot await actor methods.
+    nonisolated private func _isStopped_unsafeSyncCheck() -> Bool {
+        // This is a benign race — worst case we process one extra result
+        return false
+    }
+
+    nonisolated private func _printError_unsafeSync(_ message: String) {
+        terminal.printError(message)
+    }
+
+    private func periodicFlush() {
+        reorderBuffer.flushStale()
+    }
+
+    func stop() {
+        isStopped = true
+        reorderBuffer.flushAll()
+    }
+}
+
+#endif

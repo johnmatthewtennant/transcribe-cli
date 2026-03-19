@@ -6,7 +6,9 @@ import Speech
 /// Thread-safe shutdown reentrancy guard.
 private let _shutdownLock = OSAllocatedUnfairLock(initialState: false)
 
+#if compiler(>=6.2)
 @available(macOS 26.0, *)
+#endif
 @main
 struct Transcribe: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -640,6 +642,7 @@ func restoreTerminal() {
     }
 }
 
+#if compiler(>=6.2)
 @available(macOS 26.0, *)
 func ensureSpeechModel(terminal: TerminalUI) async throws {
     let locales = await SpeechTranscriber.installedLocales
@@ -656,3 +659,16 @@ func ensureSpeechModel(terminal: TerminalUI) async throws {
         terminal.printInfo("Speech model available.")
     }
 }
+#else
+func ensureSpeechModel(terminal: TerminalUI) async throws {
+    guard SFSpeechRecognizer.authorizationStatus() == .authorized ||
+          SFSpeechRecognizer.authorizationStatus() == .notDetermined else {
+        throw TranscribeError.modelUnavailable("Speech recognition not authorized. Check System Settings > Privacy & Security > Speech Recognition.")
+    }
+    guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
+          recognizer.isAvailable else {
+        throw TranscribeError.modelUnavailable("Speech recognizer not available for English.")
+    }
+    terminal.printInfo("Speech recognizer available.")
+}
+#endif
