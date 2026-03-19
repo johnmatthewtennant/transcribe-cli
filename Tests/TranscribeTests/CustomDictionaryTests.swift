@@ -187,4 +187,32 @@ struct CustomDictionaryTests {
         #expect(dict.count == 1)
         #expect(dict.apply(to: "hello world") == "hi world")
     }
+
+    @Test func deterministicOrder() throws {
+        defer { cleanup() }
+        let path = tmpDir.appendingPathComponent("dict.json")
+        try """
+        {"hello": "hi", "world": "earth"}
+        """.write(to: path, atomically: true, encoding: .utf8)
+
+        let dict = try CustomDictionary.load(from: path.path)
+        // Same input always produces same output
+        let result1 = dict.apply(to: "hello world")
+        let result2 = dict.apply(to: "hello world")
+        #expect(result1 == result2)
+        #expect(result1 == "hi earth")
+    }
+
+    @Test func replacementValuesSanitized() throws {
+        defer { cleanup() }
+        let path = tmpDir.appendingPathComponent("dict.json")
+        try """
+        {"test": "clean\\nvalue\\u0007here"}
+        """.write(to: path, atomically: true, encoding: .utf8)
+
+        let dict = try CustomDictionary.load(from: path.path)
+        let result = dict.apply(to: "a test word")
+        #expect(!result.contains("\n"))
+        #expect(!result.contains("\u{0007}"))
+    }
 }

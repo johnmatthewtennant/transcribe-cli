@@ -224,8 +224,7 @@ actor TranscriptionEngine {
                     continue
                 }
 
-                // Final result: clear volatile display for this speaker, apply corrections, add to reorder buffer
-                terminal.clearVolatile(for: speaker)
+                // Final result: apply dictionary corrections, compute wall-clock, add to reorder buffer
                 let correctedText = dictionary.apply(to: text)
 
                 // Read originHostTime lazily — it's set by the audio callback on first buffer
