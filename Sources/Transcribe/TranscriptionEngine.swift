@@ -284,13 +284,25 @@ func makeAnalyzerInputStream(
                 bufferCount += 1
                 let sourceFormat = timestamped.buffer.format
 
-                // Initialize converter on first buffer if formats differ
-                if converter == nil && sourceFormat != targetFormat {
-                    DiagnosticLog.shared.log("[AnalyzerInput] Format conversion needed: \(sourceFormat) → \(targetFormat)")
-                    converter = AVAudioConverter(from: sourceFormat, to: targetFormat)
-                    if converter == nil {
-                        DiagnosticLog.shared.log("[AnalyzerInput] ERROR: AVAudioConverter creation failed!")
+                // Create or recreate converter when source format changes (e.g. audio device switch)
+                if sourceFormat != targetFormat {
+                    if converter == nil || converter!.inputFormat != sourceFormat {
+                        if converter != nil {
+                            DiagnosticLog.shared.log("[AnalyzerInput] Source format changed — reinitializing converter: \(sourceFormat) → \(targetFormat)")
+                            dropCount = 0  // Reset drop counter for new converter
+                        } else {
+                            DiagnosticLog.shared.log("[AnalyzerInput] Format conversion needed: \(sourceFormat) → \(targetFormat)")
+                        }
+                        converter = AVAudioConverter(from: sourceFormat, to: targetFormat)
+                        if converter == nil {
+                            DiagnosticLog.shared.log("[AnalyzerInput] ERROR: AVAudioConverter creation failed!")
+                        }
                     }
+                } else if converter != nil {
+                    // Source now matches target (e.g. switched to a device with native target format)
+                    DiagnosticLog.shared.log("[AnalyzerInput] Source format now matches target — switching to passthrough")
+                    converter = nil
+                    dropCount = 0
                 }
 
                 let outputBuffer: AVAudioPCMBuffer
