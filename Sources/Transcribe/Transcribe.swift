@@ -50,12 +50,6 @@ struct Transcribe: AsyncParsableCommand {
     @Flag(name: .long, help: "Disable the custom dictionary, even if the default file exists.")
     var noDictionary = false
 
-    @Option(name: .long, help: "Path to a JSON dictionary file for correcting mistranscribed words. Default: ~/.config/transcribe/dictionary.json")
-    var dictionary: String?
-
-    @Flag(name: .long, help: "Disable the custom dictionary, even if the default file exists.")
-    var noDictionary = false
-
     mutating func run() async throws {
         let transcriptsDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Documents/transcripts")
