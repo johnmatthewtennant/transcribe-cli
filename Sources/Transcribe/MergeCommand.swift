@@ -131,7 +131,8 @@ struct MergeCommand: ParsableCommand {
                 fputs("Deleted: \(deleted.joined(separator: ", "))\n", stderr)
             }
             if !failed.isEmpty {
-                fputs("Warning: failed to delete: \(failed.joined(separator: "; "))\n", stderr)
+                fputs("Error: failed to delete: \(failed.joined(separator: "; "))\n", stderr)
+                throw ExitCode(1)
             }
         }
     }

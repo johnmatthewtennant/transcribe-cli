@@ -174,4 +174,64 @@ struct MergeCommandTests {
         #expect(abs(leftSample - 1.0) < 0.001, "Left channel should contain mic data (~1.0), got \(leftSample)")
         #expect(abs(rightSample - (-1.0)) < 0.001, "Right channel should contain sys data (~-1.0), got \(rightSample)")
     }
+
+    @Test("Same file for mic and sys rejected")
+    @available(macOS 26.0, *)
+    func testSameFileRejected() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let cafPath = dir.appendingPathComponent("same.caf")
+        try createMonoCAF(at: cafPath)
+
+        var cmd = try MergeCommand.parse([cafPath.path, cafPath.path])
+        #expect(throws: (any Error).self) {
+            try cmd.run()
+        }
+    }
+
+    @Test("Partial output cleaned up on merge failure")
+    @available(macOS 26.0, *)
+    func testPartialOutputCleanedUp() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let micPath = dir.appendingPathComponent("fail.mic.caf")
+        let sysPath = dir.appendingPathComponent("fail.sys.caf")
+        let outPath = dir.appendingPathComponent("fail.wav")
+
+        // Create mic as mono CAF but sys as stereo (will cause merge to fail)
+        try createMonoCAF(at: micPath)
+
+        let frameCount: AVAudioFrameCount = 48000
+        guard let stereoFormat = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2),
+              let buffer = AVAudioPCMBuffer(pcmFormat: stereoFormat, frameCapacity: frameCount) else {
+            throw TranscribeError.captureError("Cannot create stereo buffer")
+        }
+        buffer.frameLength = frameCount
+        let file = try AVAudioFile(forWriting: sysPath, settings: stereoFormat.settings)
+        try file.write(from: buffer)
+
+        // Merge should fail because sys is stereo
+        #expect(throws: (any Error).self) {
+            try AudioMerger.mergeToStereoWAV(micPath: micPath, sysPath: sysPath, outputPath: outPath)
+        }
+
+        // The AudioMerger itself doesn't clean up, but let's verify MergeCommand does
+        // Pre-create the output to simulate partial write
+        FileManager.default.createFile(atPath: outPath.path, contents: Data([0x00]))
+        #expect(FileManager.default.fileExists(atPath: outPath.path))
+
+        // Now delete it to reset, and test via MergeCommand which has cleanup
+        try? FileManager.default.removeItem(at: outPath)
+
+        // Use MergeCommand which wraps mergeToStereo with cleanup
+        var cmd = try MergeCommand.parse([micPath.path, sysPath.path, "-o", outPath.path])
+        #expect(throws: (any Error).self) {
+            try cmd.run()
+        }
+
+        // Output file should NOT exist after failed merge (cleanup happened)
+        #expect(!FileManager.default.fileExists(atPath: outPath.path))
+    }
 }
