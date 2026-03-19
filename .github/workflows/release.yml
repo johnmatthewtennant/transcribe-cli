@@ -70,7 +70,7 @@ jobs:
           # Wait for tarball to be available
           for i in 1 2 3 4 5; do
             HTTP_CODE=$(curl -sL -o /tmp/release.tar.gz -w '%{http_code}' \
-              "https://github.com/johnmatthewtennant/swift-transcribe/archive/refs/tags/${TAG}.tar.gz")
+              "https://github.com/johnmatthewtennant/transcribe-cli/archive/refs/tags/${TAG}.tar.gz")
             if [ "$HTTP_CODE" = "200" ]; then break; fi
             echo "Tarball not ready (HTTP $HTTP_CODE), retrying in 5s..."
             sleep 5
@@ -81,11 +81,11 @@ jobs:
           git clone https://x-access-token:${TAP_TOKEN}@github.com/johnmatthewtennant/homebrew-tap.git /tmp/homebrew-tap
           cd /tmp/homebrew-tap
 
-          sed -i '' "s|url \".*\"|url \"https://github.com/johnmatthewtennant/swift-transcribe/archive/refs/tags/${TAG}.tar.gz\"|" Formula/swift-transcribe.rb
-          sed -i '' "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/swift-transcribe.rb
+          sed -i '' "s|url \".*\"|url \"https://github.com/johnmatthewtennant/transcribe-cli/archive/refs/tags/${TAG}.tar.gz\"|" Formula/transcribe-cli.rb
+          sed -i '' "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/transcribe-cli.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/swift-transcribe.rb
-          git commit -m "swift-transcribe: bump to ${TAG}"
+          git add Formula/transcribe-cli.rb
+          git commit -m "transcribe-cli: bump to ${TAG}"
           git push
