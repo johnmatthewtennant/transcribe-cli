@@ -1,7 +1,7 @@
 import AVFoundation
 import Foundation
 
-/// Merges two mono CAF audio files into a single stereo AAC-compressed M4A file.
+/// Merges two mono audio files into a single stereo output file.
 /// Left channel = mic (local), Right channel = system (remote).
 /// Uses chunked I/O to bound memory usage regardless of recording length.
 enum AudioMerger {
@@ -9,18 +9,39 @@ enum AudioMerger {
     /// Number of frames to process per chunk. 64K frames at 48kHz = ~1.3 seconds.
     private static let chunkSize: AVAudioFrameCount = 65536
 
-    /// Merge two mono CAF files into a stereo M4A.
-    /// - Parameters:
-    ///   - micPath: Path to the mono mic CAF file
-    ///   - sysPath: Path to the mono system audio CAF file
-    ///   - outputPath: Desired output path (should have .m4a extension)
-    /// - Returns: The output URL on success
-    /// - Throws: On read/write/conversion errors
+    /// Supported output formats for merged audio.
+    enum OutputFormat {
+        case aac
+        case wav
+    }
+
+    /// Merge two mono CAF files into a stereo M4A (AAC-compressed).
     @discardableResult
     static func mergeToStereoAAC(
         micPath: URL,
         sysPath: URL,
         outputPath: URL
+    ) throws -> URL {
+        try mergeToStereo(micPath: micPath, sysPath: sysPath, outputPath: outputPath, format: .aac)
+    }
+
+    /// Merge two mono CAF files into a stereo WAV (uncompressed PCM).
+    @discardableResult
+    static func mergeToStereoWAV(
+        micPath: URL,
+        sysPath: URL,
+        outputPath: URL
+    ) throws -> URL {
+        try mergeToStereo(micPath: micPath, sysPath: sysPath, outputPath: outputPath, format: .wav)
+    }
+
+    /// Merge two mono audio files into a stereo output file.
+    @discardableResult
+    static func mergeToStereo(
+        micPath: URL,
+        sysPath: URL,
+        outputPath: URL,
+        format: OutputFormat
     ) throws -> URL {
         let micFile = try AVAudioFile(forReading: micPath)
         let sysFile = try AVAudioFile(forReading: sysPath)
@@ -61,19 +82,38 @@ enum AudioMerger {
             attributes: [.posixPermissions: 0o600]
         )
 
-        let aacSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: sampleRate,
-            AVNumberOfChannelsKey: 2,
-            AVEncoderBitRateKey: 128_000
-        ]
-
-        let outputFile = try AVAudioFile(
-            forWriting: outputPath,
-            settings: aacSettings,
-            commonFormat: .pcmFormatFloat32,
-            interleaved: false
-        )
+        let outputFile: AVAudioFile
+        switch format {
+        case .aac:
+            let aacSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: sampleRate,
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: 128_000
+            ]
+            outputFile = try AVAudioFile(
+                forWriting: outputPath,
+                settings: aacSettings,
+                commonFormat: .pcmFormatFloat32,
+                interleaved: false
+            )
+        case .wav:
+            let wavSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVSampleRateKey: sampleRate,
+                AVNumberOfChannelsKey: 2,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: true
+            ]
+            outputFile = try AVAudioFile(
+                forWriting: outputPath,
+                settings: wavSettings,
+                commonFormat: .pcmFormatFloat32,
+                interleaved: false
+            )
+        }
 
         guard let micChunk = AVAudioPCMBuffer(pcmFormat: micFormat, frameCapacity: chunkSize),
               let sysChunk = AVAudioPCMBuffer(pcmFormat: sysFormat, frameCapacity: chunkSize),
