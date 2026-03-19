@@ -10,7 +10,7 @@ enum AudioMerger {
     private static let chunkSize: AVAudioFrameCount = 65536
 
     /// Supported output formats for merged audio.
-    enum OutputFormat: Equatable {
+    enum OutputFormat {
         case aac
         case wav
     }
@@ -36,13 +36,6 @@ enum AudioMerger {
     }
 
     /// Merge two mono audio files into a stereo output file.
-    /// - Parameters:
-    ///   - micPath: Path to the mono mic audio file (left channel)
-    ///   - sysPath: Path to the mono system audio file (right channel)
-    ///   - outputPath: Desired output path
-    ///   - format: Output format (.aac for M4A, .wav for uncompressed PCM)
-    /// - Returns: The output URL on success
-    /// - Throws: On read/write/conversion errors
     @discardableResult
     static func mergeToStereo(
         micPath: URL,
@@ -112,7 +105,7 @@ enum AudioMerger {
                 AVLinearPCMBitDepthKey: 16,
                 AVLinearPCMIsFloatKey: false,
                 AVLinearPCMIsBigEndianKey: false,
-                AVLinearPCMIsNonInterleaved: false
+                AVLinearPCMIsNonInterleaved: true
             ]
             outputFile = try AVAudioFile(
                 forWriting: outputPath,

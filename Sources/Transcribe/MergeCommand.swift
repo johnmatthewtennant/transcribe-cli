@@ -39,6 +39,18 @@ struct MergeCommand: ParsableCommand {
         guard validFormats.contains(format.lowercased()) else {
             throw ValidationError("Unsupported format '\(format)'. Use 'wav' or 'm4a'.")
         }
+
+        // Validate output extension matches format when both are specified
+        if let output {
+            let ext = (output as NSString).pathExtension.lowercased()
+            let expectedExt = format.lowercased() == "m4a" ? "m4a" : "wav"
+            if !ext.isEmpty && ext != expectedExt {
+                throw ValidationError(
+                    "Output extension '.\(ext)' does not match --format '\(format)'. "
+                    + "Use -o with a .\(expectedExt) extension, or change --format."
+                )
+            }
+        }
     }
 
     func run() throws {
@@ -60,7 +72,6 @@ struct MergeCommand: ParsableCommand {
         if let output {
             outputURL = URL(fileURLWithPath: (output as NSString).expandingTildeInPath).standardizedFileURL
         } else {
-            // Derive output path from mic file: remove .mic.caf, append .wav/.m4a
             let micPath = micURL.path
             let basePath: String
             if micPath.hasSuffix(".mic.caf") {
@@ -85,7 +96,6 @@ struct MergeCommand: ParsableCommand {
             format: outputFormat
         )
 
-        // Report file size
         if let attrs = try? fm.attributesOfItem(atPath: outputURL.path),
            let size = attrs[.size] as? UInt64 {
             let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
@@ -95,9 +105,31 @@ struct MergeCommand: ParsableCommand {
         }
 
         if deleteOriginals {
-            try? fm.removeItem(at: micURL)
-            try? fm.removeItem(at: sysURL)
-            fputs("Deleted original CAF files.\n", stderr)
+            var deletedCount = 0
+            var failedPaths: [String] = []
+
+            for (url, label) in [(micURL, "mic"), (sysURL, "sys")] {
+                do {
+                    try fm.removeItem(at: url)
+                    deletedCount += 1
+                } catch {
+                    failedPaths.append("\(label): \(url.lastPathComponent) (\(error.localizedDescription))")
+                }
+            }
+
+            if failedPaths.isEmpty {
+                fputs("Deleted original CAF files.\n", stderr)
+            } else if deletedCount > 0 {
+                fputs("Warning: partially deleted originals. Failed:\n", stderr)
+                for path in failedPaths {
+                    fputs("  \(path)\n", stderr)
+                }
+            } else {
+                fputs("Warning: failed to delete original CAF files:\n", stderr)
+                for path in failedPaths {
+                    fputs("  \(path)\n", stderr)
+                }
+            }
         }
     }
 }
