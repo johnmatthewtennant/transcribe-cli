@@ -44,12 +44,6 @@ struct Transcribe: AsyncParsableCommand {
     @Flag(name: .long, help: "Keep original mono CAF files after successful merge to M4A. By default, raw CAFs are deleted after merge.")
     var keepRawRecordings = false
 
-    @Option(name: .long, help: "Path to a JSON dictionary file for correcting mistranscribed words. Default: ~/.config/transcribe/dictionary.json")
-    var dictionary: String?
-
-    @Flag(name: .long, help: "Disable the custom dictionary, even if the default file exists.")
-    var noDictionary = false
-
     mutating func run() async throws {
         let transcriptsDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Documents/transcripts")
@@ -66,29 +60,15 @@ struct Transcribe: AsyncParsableCommand {
 
         let effectiveShowInterim = showInterim && isatty(STDOUT_FILENO) != 0
 
-        // Load custom dictionary
-        let customDictionary: CustomDictionary
-        if noDictionary {
-            customDictionary = .empty
-        } else if let dictionaryPath = dictionary {
-            customDictionary = try CustomDictionary.load(from: dictionaryPath)
-        } else {
-            customDictionary = CustomDictionary.loadDefault()
-        }
-
-        if customDictionary.count > 0 {
-            fputs("Loaded custom dictionary with \(customDictionary.count) entries.\n", stderr)
-        }
-
         if let file {
-            try await runFileTranscription(file: file, transcriptsDir: transcriptsDir, effectiveShowInterim: effectiveShowInterim, dictionary: customDictionary)
+            try await runFileTranscription(file: file, transcriptsDir: transcriptsDir, effectiveShowInterim: effectiveShowInterim)
         } else {
-            try await runLiveRecording(transcriptsDir: transcriptsDir, effectiveShowInterim: effectiveShowInterim, dictionary: customDictionary)
+            try await runLiveRecording(transcriptsDir: transcriptsDir, effectiveShowInterim: effectiveShowInterim)
         }
     }
 
     /// Transcribe an existing audio file.
-    private func runFileTranscription(file: String, transcriptsDir: URL, effectiveShowInterim: Bool, dictionary: CustomDictionary) async throws {
+    private func runFileTranscription(file: String, transcriptsDir: URL, effectiveShowInterim: Bool) async throws {
         let fileURL = URL(fileURLWithPath: (file as NSString).expandingTildeInPath)
             .standardizedFileURL
 
@@ -136,8 +116,7 @@ struct Transcribe: AsyncParsableCommand {
             writer: writer,
             terminal: terminal,
             speaker: speakerName,
-            showInterim: effectiveShowInterim,
-            dictionary: dictionary
+            showInterim: effectiveShowInterim
         )
 
         let startTime = Date()
@@ -171,7 +150,7 @@ struct Transcribe: AsyncParsableCommand {
     }
 
     /// Run live mic + system audio recording and transcription.
-    private func runLiveRecording(transcriptsDir: URL, effectiveShowInterim: Bool, dictionary: CustomDictionary) async throws {
+    private func runLiveRecording(transcriptsDir: URL, effectiveShowInterim: Bool) async throws {
         // Parse speaker names
         let speakerNames = parseSpeakerNames(speakers)
         let micSpeaker = speakerNames.0
@@ -275,8 +254,7 @@ struct Transcribe: AsyncParsableCommand {
             terminal: terminal,
             micSpeaker: micSpeaker,
             systemSpeaker: systemSpeaker,
-            showInterim: effectiveShowInterim,
-            dictionary: dictionary
+            showInterim: effectiveShowInterim
         )
 
         // Build shutdown closure (shared by Ctrl+C and Escape)
