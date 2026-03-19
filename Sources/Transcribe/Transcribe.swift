@@ -11,7 +11,8 @@ private let _shutdownLock = OSAllocatedUnfairLock(initialState: false)
 struct Transcribe: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "transcribe",
-        abstract: "Record microphone + system audio and produce a real-time speaker-attributed transcript."
+        abstract: "Record microphone + system audio and produce a real-time speaker-attributed transcript.",
+        subcommands: [MergeCommand.self]
     )
 
     @Option(name: .long, help: "Title for the recording session.")

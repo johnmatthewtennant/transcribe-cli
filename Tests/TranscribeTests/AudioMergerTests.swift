@@ -159,4 +159,93 @@ struct AudioMergerTests {
         let perms = attrs[.posixPermissions] as? Int ?? 0
         #expect(perms == 0o600)
     }
+
+    // MARK: - WAV Output Tests
+
+    @Test("Merge produces valid WAV")
+    func testMergeProducesValidWAV() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let micPath = dir.appendingPathComponent("test.mic.caf")
+        let sysPath = dir.appendingPathComponent("test.sys.caf")
+        let outPath = dir.appendingPathComponent("test.wav")
+
+        try createMonoCAF(at: micPath, frequency: 440.0)
+        try createMonoCAF(at: sysPath, frequency: 880.0)
+
+        let result = try AudioMerger.mergeToStereoWAV(micPath: micPath, sysPath: sysPath, outputPath: outPath)
+
+        #expect(FileManager.default.fileExists(atPath: result.path))
+        let attrs = try FileManager.default.attributesOfItem(atPath: result.path)
+        let size = attrs[.size] as? Int ?? 0
+        #expect(size > 0)
+
+        let outputFile = try AVAudioFile(forReading: result)
+        #expect(outputFile.processingFormat.channelCount == 2)
+        #expect(outputFile.length > 0)
+    }
+
+    @Test("WAV merge with different lengths succeeds")
+    func testWAVMergeDifferentLengths() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let micPath = dir.appendingPathComponent("test.mic.caf")
+        let sysPath = dir.appendingPathComponent("test.sys.caf")
+        let outPath = dir.appendingPathComponent("test.wav")
+
+        try createMonoCAF(at: micPath, durationSeconds: 2.0)
+        try createMonoCAF(at: sysPath, durationSeconds: 1.0)
+
+        let result = try AudioMerger.mergeToStereoWAV(micPath: micPath, sysPath: sysPath, outputPath: outPath)
+
+        let outputFile = try AVAudioFile(forReading: result)
+        #expect(outputFile.processingFormat.channelCount == 2)
+        // WAV output length should match the longer input
+        let expectedFrames = AVAudioFramePosition(48000 * 2.0)  // 2 seconds at 48kHz
+        #expect(outputFile.length == expectedFrames)
+    }
+
+    @Test("WAV output has restrictive permissions")
+    func testWAVOutputPermissions() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let micPath = dir.appendingPathComponent("test.mic.caf")
+        let sysPath = dir.appendingPathComponent("test.sys.caf")
+        let outPath = dir.appendingPathComponent("test.wav")
+
+        try createMonoCAF(at: micPath)
+        try createMonoCAF(at: sysPath)
+
+        try AudioMerger.mergeToStereoWAV(micPath: micPath, sysPath: sysPath, outputPath: outPath)
+
+        let attrs = try FileManager.default.attributesOfItem(atPath: outPath.path)
+        let perms = attrs[.posixPermissions] as? Int ?? 0
+        #expect(perms == 0o600)
+    }
+
+    @Test("WAV output is larger than AAC for same input")
+    func testWAVLargerThanAAC() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let micPath = dir.appendingPathComponent("test.mic.caf")
+        let sysPath = dir.appendingPathComponent("test.sys.caf")
+        let wavPath = dir.appendingPathComponent("test.wav")
+        let m4aPath = dir.appendingPathComponent("test.m4a")
+
+        try createMonoCAF(at: micPath, durationSeconds: 2.0)
+        try createMonoCAF(at: sysPath, durationSeconds: 2.0)
+
+        try AudioMerger.mergeToStereoWAV(micPath: micPath, sysPath: sysPath, outputPath: wavPath)
+        try AudioMerger.mergeToStereoAAC(micPath: micPath, sysPath: sysPath, outputPath: m4aPath)
+
+        let wavSize = (try FileManager.default.attributesOfItem(atPath: wavPath.path)[.size] as? Int) ?? 0
+        let m4aSize = (try FileManager.default.attributesOfItem(atPath: m4aPath.path)[.size] as? Int) ?? 0
+
+        // WAV (uncompressed) should be larger than AAC (compressed)
+        #expect(wavSize > m4aSize)
+    }
 }
