@@ -82,7 +82,7 @@ One-time download, cached by the OS. If the user has used dictation in English b
 Writes to `~/.transcripts/{date}-{slugified-title}.md`:
 
 ```markdown
-# Weekly sync with Jeanne — 2026-03-10 14:30
+# Weekly sync with Alice — 2026-03-10 14:30
 
 **You** (14:30:15): Hey, how's the project going?
 
@@ -104,10 +104,10 @@ Writes to `~/.transcripts/{date}-{slugified-title}.md`:
 transcribe
 
 # Start with a custom title
-transcribe --title "Weekly sync with Jeanne"
+transcribe --title "Weekly sync with Alice"
 
 # Resume a previous recording (appends with --- separator)
-transcribe --resume "2026-03-10-weekly-sync-with-jeanne.md"
+transcribe --resume "2026-03-10-weekly-sync-with-alice.md"
 
 # Resume the most recent recording
 transcribe --resume
@@ -116,7 +116,7 @@ transcribe --resume
 transcribe --list
 
 # Custom speaker names
-transcribe --speakers "Jack,Jeanne"
+transcribe --speakers "Jack,Alice"
 ```
 
 ### Behavior:

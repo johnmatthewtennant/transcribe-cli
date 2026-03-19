@@ -60,9 +60,9 @@ struct ParseSpeakerNamesTests {
     }
 
     @Test func twoNames() {
-        let (mic, sys) = parseSpeakerNames("Jack,Jeanne")
+        let (mic, sys) = parseSpeakerNames("Jack,Bob")
         #expect(mic == "Jack")
-        #expect(sys == "Jeanne")
+        #expect(sys == "Bob")
     }
 
     @Test func singleName() {
@@ -72,15 +72,15 @@ struct ParseSpeakerNamesTests {
     }
 
     @Test func extraCommas() {
-        let (mic, sys) = parseSpeakerNames("Jack, Jeanne , Extra")
+        let (mic, sys) = parseSpeakerNames("Jack, Bob , Extra")
         #expect(mic == "Jack")
-        #expect(sys == "Jeanne , Extra")
+        #expect(sys == "Bob , Extra")
     }
 
     @Test func whitespaceTrimmmed() {
-        let (mic, sys) = parseSpeakerNames("  Jack  ,  Jeanne  ")
+        let (mic, sys) = parseSpeakerNames("  Jack  ,  Bob  ")
         #expect(mic == "Jack")
-        #expect(sys == "Jeanne")
+        #expect(sys == "Bob")
     }
 }
 

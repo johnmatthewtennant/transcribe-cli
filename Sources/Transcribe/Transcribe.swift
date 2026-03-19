@@ -31,7 +31,7 @@ struct Transcribe: AsyncParsableCommand {
     @Flag(name: .customLong("install-skill"), help: "Install the Claude Code skill (symlinks to ~/.claude/skills/ and ~/.agents/skills/).")
     var installSkill = false
 
-    @Option(name: .long, help: "Comma-separated speaker names (e.g. \"Jack,Jeanne\"). First is mic, second is system audio.")
+    @Option(name: .long, help: "Comma-separated speaker names (e.g. \"Alice,Bob\"). First is mic, second is system audio.")
     var speakers: String?
 
     @Option(name: .long, help: "Path to an audio file (m4a, wav, mp3, caf, etc.) to transcribe offline.")
