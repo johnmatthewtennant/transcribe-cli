@@ -19,7 +19,8 @@ import Foundation
 ///
 /// Entries are applied in deterministic order: longest key first, then
 /// alphabetically for same-length keys. This ensures longer phrases match
-/// before shorter substrings.
+/// before shorter substrings. Replacements are applied sequentially, so
+/// earlier replacements can feed into later ones (cascading).
 ///
 /// - Note: Marked `@unchecked Sendable` because `Regex<Substring>` does not
 ///   conform to `Sendable`. All entries are immutable after initialization,
@@ -62,11 +63,24 @@ struct CustomDictionary: @unchecked Sendable {
 
         let entries: [(Regex<Substring>, String)] = sortedKeys.compactMap { key in
             guard let value = dict[key] else { return nil }
-            // Escape regex metacharacters in the key, then wrap with word boundaries.
+            // Escape regex metacharacters in the key, then wrap with appropriate boundaries.
             let escaped = NSRegularExpression.escapedPattern(for: key)
-            guard let regex = try? Regex<Substring>("(?i)\\b\(escaped)\\b") else { return nil }
-            // Sanitize replacement: strip control characters to prevent terminal/file injection.
-            let sanitizedValue = value.filter { !$0.isNewline && ($0.asciiValue.map { $0 >= 32 } ?? true) }
+
+            // Use \b when the key edge is a word character, otherwise use a
+            // negative lookaround for word characters. This ensures keys like
+            // "C++" or "#hashtag" match correctly at non-word boundaries.
+            let firstIsWord = key.first.map { $0.isLetter || $0.isNumber || $0 == "_" } ?? false
+            let lastIsWord = key.last.map { $0.isLetter || $0.isNumber || $0 == "_" } ?? false
+            let leading = firstIsWord ? "\\b" : "(?<!\\w)"
+            let trailing = lastIsWord ? "\\b" : "(?!\\w)"
+            guard let regex = try? Regex<Substring>("(?i)\(leading)\(escaped)\(trailing)") else { return nil }
+
+            // Sanitize replacement: strip control/format characters (including
+            // Unicode bidi controls) to prevent terminal/file injection.
+            let sanitizedValue = String(value.unicodeScalars.filter { scalar in
+                !CharacterSet.controlCharacters.contains(scalar) &&
+                !CharacterSet(charactersIn: "\u{200B}\u{200C}\u{200D}\u{200E}\u{200F}\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}\u{FEFF}").contains(scalar)
+            })
             return (regex, sanitizedValue)
         }
 

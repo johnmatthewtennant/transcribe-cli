@@ -203,6 +203,23 @@ struct CustomDictionaryTests {
         #expect(result1 == "hi earth")
     }
 
+    @Test func overlappingKeysLongerMatchesFirst() throws {
+        defer { cleanup() }
+        let path = tmpDir.appendingPathComponent("dict.json")
+        // "foo bar" is longer than "foo", so it should match first.
+        // Cascading: the replacement of "foo bar" happens before "foo" is considered.
+        try """
+        {"foo": "X", "foo bar": "Y"}
+        """.write(to: path, atomically: true, encoding: .utf8)
+
+        let dict = try CustomDictionary.load(from: path.path)
+        // "foo bar" matched first (longer key), replaced with "Y"
+        // Then "foo" rule doesn't match "Y", so result is just "Y"
+        #expect(dict.apply(to: "foo bar") == "Y")
+        // Standalone "foo" still replaced by shorter rule
+        #expect(dict.apply(to: "foo baz") == "X baz")
+    }
+
     @Test func replacementValuesSanitized() throws {
         defer { cleanup() }
         let path = tmpDir.appendingPathComponent("dict.json")
@@ -214,5 +231,19 @@ struct CustomDictionaryTests {
         let result = dict.apply(to: "a test word")
         #expect(!result.contains("\n"))
         #expect(!result.contains("\u{0007}"))
+    }
+
+    @Test func unicodeControlCharsSanitized() throws {
+        defer { cleanup() }
+        let path = tmpDir.appendingPathComponent("dict.json")
+        // Include a bidi override character in replacement
+        try """
+        {"test": "clean\u{202E}value"}
+        """.write(to: path, atomically: true, encoding: .utf8)
+
+        let dict = try CustomDictionary.load(from: path.path)
+        let result = dict.apply(to: "a test word")
+        #expect(!result.contains("\u{202E}"))
+        #expect(result.contains("cleanvalue"))
     }
 }
