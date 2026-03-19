@@ -39,6 +39,19 @@ struct MergeCommand: ParsableCommand {
         guard validFormats.contains(format.lowercased()) else {
             throw ValidationError("Unsupported format '\(format)'. Use 'wav' or 'm4a'.")
         }
+
+        // Warn if output extension doesn't match format
+        if let output {
+            let outputURL = URL(fileURLWithPath: output)
+            let ext = outputURL.pathExtension.lowercased()
+            let expectedExt = format.lowercased() == "m4a" ? "m4a" : "wav"
+            if !ext.isEmpty && ext != expectedExt {
+                throw ValidationError(
+                    "Output extension '.\(ext)' doesn't match format '\(format)'. "
+                    + "Use -o with a .\(expectedExt) extension, or change --format."
+                )
+            }
+        }
     }
 
     func run() throws {
@@ -51,6 +64,9 @@ struct MergeCommand: ParsableCommand {
         }
         guard fm.fileExists(atPath: sysURL.path) else {
             throw ValidationError("System file not found: \(sysURL.path)")
+        }
+        guard micURL != sysURL else {
+            throw ValidationError("Mic and system files must be different files.")
         }
 
         let outputFormat: AudioMerger.OutputFormat = format.lowercased() == "m4a" ? .aac : .wav
@@ -78,12 +94,18 @@ struct MergeCommand: ParsableCommand {
         fputs("Merging:\n  mic: \(micURL.lastPathComponent)\n  sys: \(sysURL.lastPathComponent)\n", stderr)
         fputs("Output: \(outputURL.path)\n", stderr)
 
-        try AudioMerger.mergeToStereo(
-            micPath: micURL,
-            sysPath: sysURL,
-            outputPath: outputURL,
-            format: outputFormat
-        )
+        do {
+            try AudioMerger.mergeToStereo(
+                micPath: micURL,
+                sysPath: sysURL,
+                outputPath: outputURL,
+                format: outputFormat
+            )
+        } catch {
+            // Clean up partial output file on failure
+            try? fm.removeItem(at: outputURL)
+            throw error
+        }
 
         // Report file size
         if let attrs = try? fm.attributesOfItem(atPath: outputURL.path),
@@ -95,9 +117,22 @@ struct MergeCommand: ParsableCommand {
         }
 
         if deleteOriginals {
-            try? fm.removeItem(at: micURL)
-            try? fm.removeItem(at: sysURL)
-            fputs("Deleted original CAF files.\n", stderr)
+            var deleted: [String] = []
+            var failed: [String] = []
+            for url in [micURL, sysURL] {
+                do {
+                    try fm.removeItem(at: url)
+                    deleted.append(url.lastPathComponent)
+                } catch {
+                    failed.append("\(url.lastPathComponent): \(error.localizedDescription)")
+                }
+            }
+            if !deleted.isEmpty {
+                fputs("Deleted: \(deleted.joined(separator: ", "))\n", stderr)
+            }
+            if !failed.isEmpty {
+                fputs("Warning: failed to delete: \(failed.joined(separator: "; "))\n", stderr)
+            }
         }
     }
 }
