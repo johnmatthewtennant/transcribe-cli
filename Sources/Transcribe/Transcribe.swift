@@ -41,8 +41,14 @@ struct Transcribe: AsyncParsableCommand {
     @Flag(name: .long, help: "Show in-progress speech recognition text at the bottom of the terminal. Ignored when stdout is not a TTY.")
     var showInterim = false
 
-    @Flag(name: .long, help: "Delete original mono CAF files after successful merge to M4A.")
-    var deleteRawRecordings = false
+    @Flag(name: .long, help: "Keep original mono CAF files after successful merge to M4A. By default, raw CAFs are deleted after merge.")
+    var keepRawRecordings = false
+
+    @Option(name: .long, help: "Path to a JSON dictionary file for correcting mistranscribed words. Default: ~/.config/transcribe/dictionary.json")
+    var dictionary: String?
+
+    @Flag(name: .long, help: "Disable the custom dictionary, even if the default file exists.")
+    var noDictionary = false
 
     mutating func run() async throws {
         let transcriptsDir = FileManager.default.homeDirectoryForCurrentUser
@@ -60,15 +66,29 @@ struct Transcribe: AsyncParsableCommand {
 
         let effectiveShowInterim = showInterim && isatty(STDOUT_FILENO) != 0
 
-        if let file {
-            try await runFileTranscription(file: file, transcriptsDir: transcriptsDir, effectiveShowInterim: effectiveShowInterim)
+        // Load custom dictionary
+        let customDictionary: CustomDictionary
+        if noDictionary {
+            customDictionary = .empty
+        } else if let dictionaryPath = dictionary {
+            customDictionary = try CustomDictionary.load(from: dictionaryPath)
         } else {
-            try await runLiveRecording(transcriptsDir: transcriptsDir, effectiveShowInterim: effectiveShowInterim)
+            customDictionary = CustomDictionary.loadDefault()
+        }
+
+        if customDictionary.count > 0 {
+            fputs("Loaded custom dictionary with \(customDictionary.count) entries.\n", stderr)
+        }
+
+        if let file {
+            try await runFileTranscription(file: file, transcriptsDir: transcriptsDir, effectiveShowInterim: effectiveShowInterim, dictionary: customDictionary)
+        } else {
+            try await runLiveRecording(transcriptsDir: transcriptsDir, effectiveShowInterim: effectiveShowInterim, dictionary: customDictionary)
         }
     }
 
     /// Transcribe an existing audio file.
-    private func runFileTranscription(file: String, transcriptsDir: URL, effectiveShowInterim: Bool) async throws {
+    private func runFileTranscription(file: String, transcriptsDir: URL, effectiveShowInterim: Bool, dictionary: CustomDictionary) async throws {
         let fileURL = URL(fileURLWithPath: (file as NSString).expandingTildeInPath)
             .standardizedFileURL
 
@@ -116,7 +136,8 @@ struct Transcribe: AsyncParsableCommand {
             writer: writer,
             terminal: terminal,
             speaker: speakerName,
-            showInterim: effectiveShowInterim
+            showInterim: effectiveShowInterim,
+            dictionary: dictionary
         )
 
         let startTime = Date()
@@ -150,7 +171,7 @@ struct Transcribe: AsyncParsableCommand {
     }
 
     /// Run live mic + system audio recording and transcription.
-    private func runLiveRecording(transcriptsDir: URL, effectiveShowInterim: Bool) async throws {
+    private func runLiveRecording(transcriptsDir: URL, effectiveShowInterim: Bool, dictionary: CustomDictionary) async throws {
         // Parse speaker names
         let speakerNames = parseSpeakerNames(speakers)
         let micSpeaker = speakerNames.0
@@ -254,13 +275,14 @@ struct Transcribe: AsyncParsableCommand {
             terminal: terminal,
             micSpeaker: micSpeaker,
             systemSpeaker: systemSpeaker,
-            showInterim: effectiveShowInterim
+            showInterim: effectiveShowInterim,
+            dictionary: dictionary
         )
 
         // Build shutdown closure (shared by Ctrl+C and Escape)
         let startTime = Date()
         let recordingPaths = [micRecordingPath, sysRecordingPath].compactMap { $0 }
-        let deleteRaw = self.deleteRawRecordings
+        let keepRaw = self.keepRawRecordings
         let hasRecording = saveRecording && !isResume
 
         let shutdown: @Sendable () -> Void = {
@@ -290,12 +312,13 @@ struct Transcribe: AsyncParsableCommand {
                             sysPath: sysPath,
                             outputPath: m4aPath
                         )
-                        finalRecordingPaths = [m4aPath] + (deleteRaw ? [] : recordingPaths)
+                        finalRecordingPaths = [m4aPath] + (keepRaw ? recordingPaths : [])
 
-                        // Delete originals only if --delete-raw-recordings
-                        if deleteRaw {
+                        // Delete originals unless --keep-raw-recordings
+                        if !keepRaw {
                             try? FileManager.default.removeItem(at: micPath)
                             try? FileManager.default.removeItem(at: sysPath)
+                            terminal.printInfo("Raw CAF files deleted (use --keep-raw-recordings to preserve).")
                         }
                     } catch {
                         terminal.printError("Failed to merge recordings: \(error.localizedDescription)")
