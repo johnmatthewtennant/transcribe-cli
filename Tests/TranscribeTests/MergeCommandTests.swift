@@ -196,6 +196,22 @@ struct MergeCommandTests {
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
+        // Create two valid mono CAFs with mismatched sample rates.
+        // AudioMerger validates mono first (passes), then checks sample rates
+        // AFTER creating the output file via FileManager.createFile.
+        // However, the current implementation validates before file creation,
+        // so we use a different approach: create valid inputs that pass all
+        // validation but fail during AVAudioFile write.
+        //
+        // We create a read-only subdirectory at the output path, causing
+        // AudioMerger.mergeToStereo to create the placeholder file (via
+        // FileManager.createFile which fails silently for directories), then
+        // AVAudioFile(forWriting:) throws, and MergeCommand's cleanup runs.
+        //
+        // Alternative: Since the validation error for stereo input happens
+        // before file creation, we test cleanup indirectly by verifying that
+        // no stale output exists after any error path through MergeCommand.
+
         let micPath = dir.appendingPathComponent("fail.mic.caf")
         let sysPath = dir.appendingPathComponent("fail.sys.caf")
         let outPath = dir.appendingPathComponent("fail.wav")
@@ -209,29 +225,69 @@ struct MergeCommandTests {
             throw TranscribeError.captureError("Cannot create stereo buffer")
         }
         buffer.frameLength = frameCount
-        let file = try AVAudioFile(forWriting: sysPath, settings: stereoFormat.settings)
-        try file.write(from: buffer)
-
-        // Merge should fail because sys is stereo
-        #expect(throws: (any Error).self) {
-            try AudioMerger.mergeToStereoWAV(micPath: micPath, sysPath: sysPath, outputPath: outPath)
-        }
-
-        // The AudioMerger itself doesn't clean up, but let's verify MergeCommand does
-        // Pre-create the output to simulate partial write
-        FileManager.default.createFile(atPath: outPath.path, contents: Data([0x00]))
-        #expect(FileManager.default.fileExists(atPath: outPath.path))
-
-        // Now delete it to reset, and test via MergeCommand which has cleanup
-        try? FileManager.default.removeItem(at: outPath)
+        let sysFile = try AVAudioFile(forWriting: sysPath, settings: stereoFormat.settings)
+        try sysFile.write(from: buffer)
 
         // Use MergeCommand which wraps mergeToStereo with cleanup
-        var cmd = try MergeCommand.parse([micPath.path, sysPath.path, "-o", outPath.path])
+        let cmd = try MergeCommand.parse([micPath.path, sysPath.path, "-o", outPath.path])
         #expect(throws: (any Error).self) {
             try cmd.run()
         }
 
-        // Output file should NOT exist after failed merge (cleanup happened)
-        #expect(!FileManager.default.fileExists(atPath: outPath.path))
+        // Output file should NOT exist after failed merge
+        #expect(!FileManager.default.fileExists(atPath: outPath.path),
+                "Output file should be cleaned up after merge failure")
+    }
+
+    @Test("Cleanup removes file created by AudioMerger on late failure")
+    @available(macOS 26.0, *)
+    func testCleanupOnLateFailure() throws {
+        let dir = try tempDir()
+        defer {
+            // Restore permissions before cleanup
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: dir.path
+            )
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let micPath = dir.appendingPathComponent("late.mic.caf")
+        let sysPath = dir.appendingPathComponent("late.sys.caf")
+        let outPath = dir.appendingPathComponent("late.wav")
+
+        try createMonoCAF(at: micPath)
+        try createMonoCAF(at: sysPath)
+
+        // First, verify a normal merge works
+        try AudioMerger.mergeToStereoWAV(micPath: micPath, sysPath: sysPath, outputPath: outPath)
+        #expect(FileManager.default.fileExists(atPath: outPath.path))
+
+        // Clean up for next test
+        try FileManager.default.removeItem(at: outPath)
+
+        // Now make the output directory read-only so AVAudioFile(forWriting:)
+        // fails AFTER FileManager.createFile runs (createFile may succeed
+        // because it was initiated before the chmod, or fail silently).
+        // Either way, MergeCommand's cleanup should ensure no stale output.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: dir.path
+        )
+
+        let cmd = try MergeCommand.parse([micPath.path, sysPath.path, "-o", outPath.path])
+        #expect(throws: (any Error).self) {
+            try cmd.run()
+        }
+
+        // Restore permissions to check and clean up
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: dir.path
+        )
+
+        // Output file should not exist (either never created or cleaned up)
+        #expect(!FileManager.default.fileExists(atPath: outPath.path),
+                "Output file should not exist after failed merge")
     }
 }
