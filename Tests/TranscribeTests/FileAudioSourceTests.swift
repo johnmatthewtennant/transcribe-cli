@@ -275,4 +275,23 @@ struct FileTranscriptionArgTests {
         let command = try Transcribe.parse([])
         #expect(command.showInterim == false)
     }
+
+    @Test func keepRawRecordingsFlagIsParsed() throws {
+        guard #available(macOS 26.0, *) else { return }
+        let command = try Transcribe.parse(["--keep-raw-recordings"])
+        #expect(command.keepRawRecordings == true)
+    }
+
+    @Test func keepRawRecordingsDefaultsToFalse() throws {
+        guard #available(macOS 26.0, *) else { return }
+        let command = try Transcribe.parse([])
+        #expect(command.keepRawRecordings == false)
+    }
+
+    @Test func deleteRawRecordingsIsRejected() throws {
+        guard #available(macOS 26.0, *) else { return }
+        #expect(throws: (any Error).self) {
+            _ = try Transcribe.parse(["--delete-raw-recordings"])
+        }
+    }
 }
