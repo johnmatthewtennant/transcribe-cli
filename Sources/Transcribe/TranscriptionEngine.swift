@@ -23,6 +23,7 @@ actor TranscriptionEngine {
     private let micSpeaker: String
     private let systemSpeaker: String
     private let showInterim: Bool
+    private let dictionary: CustomDictionary
 
     private var isStopped = false
     private var reorderBuffer: ReorderBuffer
@@ -34,7 +35,8 @@ actor TranscriptionEngine {
         terminal: TerminalUI,
         micSpeaker: String,
         systemSpeaker: String,
-        showInterim: Bool = false
+        showInterim: Bool = false,
+        dictionary: CustomDictionary = .empty
     ) async throws {
         self.audioCapture = audioCapture
         self.fileSource = nil
@@ -43,6 +45,7 @@ actor TranscriptionEngine {
         self.micSpeaker = micSpeaker
         self.systemSpeaker = systemSpeaker
         self.showInterim = showInterim
+        self.dictionary = dictionary
         // Temporary placeholder — will be replaced after self is fully initialized
         self.reorderBuffer = ReorderBuffer { _ in }
         // Now replace with real callback that captures self
@@ -58,7 +61,8 @@ actor TranscriptionEngine {
         writer: MarkdownWriter,
         terminal: TerminalUI,
         speaker: String,
-        showInterim: Bool = false
+        showInterim: Bool = false,
+        dictionary: CustomDictionary = .empty
     ) async throws {
         self.audioCapture = nil
         self.fileSource = fileSource
@@ -67,6 +71,7 @@ actor TranscriptionEngine {
         self.micSpeaker = speaker
         self.systemSpeaker = speaker
         self.showInterim = showInterim
+        self.dictionary = dictionary
         self.reorderBuffer = ReorderBuffer { _ in }
         self.reorderBuffer = ReorderBuffer { [writer, terminal] event in
             writer.writeLine(speaker: event.speaker, text: event.text, wallClockTime: event.wallClockTime)
@@ -214,12 +219,13 @@ actor TranscriptionEngine {
 
                 if !result.isFinal {
                     // Interim results: display-only, skip timestamp/event construction
-                    let sanitized = text.filter { $0 >= " " }
+                    let sanitized = dictionary.apply(to: text.filter { $0 >= " " })
                     terminal.showVolatile(speaker: speaker, text: sanitized)
                     continue
                 }
 
-                // Final result: compute wall-clock, create event, add to reorder buffer
+                // Final result: apply dictionary corrections, compute wall-clock, add to reorder buffer
+                let correctedText = dictionary.apply(to: text)
 
                 // Read originHostTime lazily — it's set by the audio callback on first buffer
                 let originHostTime = getOriginHostTime()
@@ -234,7 +240,7 @@ actor TranscriptionEngine {
 
                 let event = TranscriptEvent(
                     speaker: speaker,
-                    text: text,
+                    text: correctedText,
                     wallClockTime: wallClock,
                     isFinal: result.isFinal
                 )
