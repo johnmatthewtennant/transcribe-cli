@@ -41,8 +41,8 @@ struct Transcribe: AsyncParsableCommand {
     @Flag(name: .long, help: "Show in-progress speech recognition text at the bottom of the terminal. Ignored when stdout is not a TTY.")
     var showInterim = false
 
-    @Flag(name: .long, help: "Delete original mono CAF files after successful merge to M4A.")
-    var deleteRawRecordings = false
+    @Flag(name: .long, help: "Keep original mono CAF files after successful merge to M4A. By default, raw CAFs are deleted after merge.")
+    var keepRawRecordings = false
 
     mutating func run() async throws {
         let transcriptsDir = FileManager.default.homeDirectoryForCurrentUser
@@ -260,7 +260,7 @@ struct Transcribe: AsyncParsableCommand {
         // Build shutdown closure (shared by Ctrl+C and Escape)
         let startTime = Date()
         let recordingPaths = [micRecordingPath, sysRecordingPath].compactMap { $0 }
-        let deleteRaw = self.deleteRawRecordings
+        let keepRaw = self.keepRawRecordings
         let hasRecording = saveRecording && !isResume
 
         let shutdown: @Sendable () -> Void = {
@@ -290,10 +290,10 @@ struct Transcribe: AsyncParsableCommand {
                             sysPath: sysPath,
                             outputPath: m4aPath
                         )
-                        finalRecordingPaths = [m4aPath] + (deleteRaw ? [] : recordingPaths)
+                        finalRecordingPaths = [m4aPath] + (keepRaw ? recordingPaths : [])
 
-                        // Delete originals only if --delete-raw-recordings
-                        if deleteRaw {
+                        // Delete originals unless --keep-raw-recordings
+                        if !keepRaw {
                             try? FileManager.default.removeItem(at: micPath)
                             try? FileManager.default.removeItem(at: sysPath)
                         }
