@@ -268,7 +268,7 @@ struct Transcribe: AsyncParsableCommand {
         if isResume {
             terminal.printInfo("Resuming: \(filePath.path)")
         } else {
-            terminal.printInfo("Recording to: \(filePath.path)")
+            terminal.printInfo("Transcribing to: \(filePath.path)")
         }
 
         // Ensure speech model is available
@@ -283,11 +283,6 @@ struct Transcribe: AsyncParsableCommand {
             micSpeaker: micSpeaker,
             systemSpeaker: systemSpeaker
         )
-
-        // Print existing transcript lines when resuming
-        if isResume {
-            printExistingTranscript(filePath: filePath, terminal: terminal)
-        }
 
         // Set up audio capture
         terminal.printInfo("Starting audio capture...")
@@ -424,7 +419,12 @@ struct Transcribe: AsyncParsableCommand {
         // Handle Escape key
         setupEscapeKeyHandler { shutdown() }
 
-        terminal.printInfo("Recording... Press Escape or Ctrl+C to stop.\n")
+        terminal.printInfo("Transcribing... Press Escape or Ctrl+C to stop.\n")
+
+        // Print existing transcript lines when resuming (after all status messages)
+        if isResume {
+            printExistingTranscript(filePath: filePath, terminal: terminal)
+        }
 
         // Ensure cleanup on any exit path (throw, natural return)
         defer {
