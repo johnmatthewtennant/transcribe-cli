@@ -1,12 +1,15 @@
 import Foundation
 
-/// Handles colored terminal output with inline interim text.
+/// Handles colored terminal output with inline interim and processing text.
 ///
-/// Interim (volatile) text is printed inline in gray/dim, occupying the same
-/// position as finalized text. When finalized text arrives, it overwrites the
-/// interim block in place (moving up to clear the interim lines, then printing
-/// the finalized version in bold). This eliminates the visual gap between
-/// interim disappearing and finalized appearing.
+/// Three visual states for text:
+/// - **Finalized** (bold): permanent, committed by the recognizer
+/// - **Processing** (dim italic): was interim, recognizer stopped updating it, awaiting finalization
+/// - **Interim** (dim gray): actively being updated by the recognizer
+///
+/// When interim text stops growing and new interim starts for a different segment,
+/// the old interim is promoted to "processing" and stays visible inline. When the
+/// recognizer finalizes it, the processing line is replaced with bold finalized text.
 final class TerminalUI: Sendable {
     private let micSpeaker: String
     private let systemSpeaker: String
@@ -18,16 +21,24 @@ final class TerminalUI: Sendable {
     private let blue = "\u{001B}[34m"
     private let gray = "\u{001B}[90m"
     private let dim = "\u{001B}[2m"
+    private let italic = "\u{001B}[3m"
     private let bold = "\u{001B}[1m"
     private let reset = "\u{001B}[0m"
     private let clearLine = "\u{001B}[2K"
     private let moveUp = "\u{001B}[1A"
 
     private let lock = NSLock()
-    // How many terminal lines the current interim block occupies
-    nonisolated(unsafe) private var interimLineCount = 0
-    // Last interim text per speaker (for non-retraction guard)
-    nonisolated(unsafe) private var lastInterimText: [String: String] = [:]
+
+    /// Processing lines: interim text that stopped updating and is awaiting finalization.
+    /// These are printed inline (dim italic) and replaced when finalized.
+    /// Each entry is (speaker, text, terminalLineCount).
+    nonisolated(unsafe) private var processingLines: [(speaker: String, text: String, lines: Int)] = []
+
+    /// Current active interim text (the one still being updated by the recognizer).
+    nonisolated(unsafe) private var activeInterim: (speaker: String, text: String)?
+
+    /// Terminal lines occupied by the entire non-finalized block (processing + interim).
+    nonisolated(unsafe) private var nonFinalizedLineCount = 0
 
     init(micSpeaker: String, systemSpeaker: String, showInterim: Bool = false, overrideColumns: Int? = nil) {
         self.micSpeaker = micSpeaker
@@ -48,71 +59,79 @@ final class TerminalUI: Sendable {
         FileHandle.standardError.write("\(bold)\u{001B}[31mError: \(message)\(reset)\n".data(using: .utf8)!)
     }
 
-    /// Show interim text inline — printed in dim gray at the current position.
-    /// Each update clears the previous interim block and reprints.
-    /// Only shows remote/system speaker interim.
+    /// Show interim text inline. When the recognizer starts a new segment (text gets shorter),
+    /// the previous interim is promoted to a "processing" line above.
     func showVolatile(speaker: String, text: String) {
         guard showInterim else { return }
         guard speaker != micSpeaker else { return }
         lock.lock()
         defer { lock.unlock() }
 
-        lastInterimText[speaker] = text
+        // Detect new segment: if text is shorter than current interim, the old one
+        // was for a previous segment that's now in processing.
+        if let current = activeInterim, current.speaker == speaker {
+            if text.count < current.text.count {
+                // Promote old interim to processing
+                let procLine = formatProcessing(speaker: current.speaker, text: current.text)
+                let lineCount = terminalLineCount(for: procLine)
+                processingLines.append((speaker: current.speaker, text: current.text, lines: lineCount))
+            }
+        }
 
-        // Clear previous interim block
-        clearInterimBlock()
-
-        // Print new interim inline (dim gray)
-        let color = speaker == micSpeaker ? green : blue
-        let line = "\(dim)\(gray)\(color)\(speaker)\(gray): \(text)\(reset)"
-        print(line, terminator: "")
-        fflush(stdout)
-
-        // Track how many lines this occupied
-        interimLineCount = terminalLineCount(for: line)
+        activeInterim = (speaker: speaker, text: text)
+        renderNonFinalizedBlock()
     }
 
-    /// Show finalized text — clears the interim block, prints the finalized line,
-    /// then re-renders any remaining interim text below it.
-    /// The interim text persists through finalization so there's no visual gap.
+    /// Show finalized text. Clears the non-finalized block, checks if this finalization
+    /// matches a processing line (removes it), prints the finalized line, then re-renders
+    /// remaining processing lines and active interim.
     func showFinalized(speaker: String, text: String) {
         lock.lock()
         defer { lock.unlock() }
 
-        // Clear interim block visually
-        clearInterimBlock()
+        // Clear the entire non-finalized block
+        clearNonFinalizedBlock()
 
-        // Print finalized line (bold, with newline — becomes permanent)
+        // Remove the first processing line for this speaker (it's been finalized)
+        if let idx = processingLines.firstIndex(where: { $0.speaker == speaker }) {
+            processingLines.remove(at: idx)
+        }
+
+        // If the active interim matches this speaker and the finalized text starts
+        // with similar content, clear it (it was the same segment)
+        if let current = activeInterim, current.speaker == speaker {
+            // Check if this finalization consumed the active interim
+            // (finalized text is usually a refined version of the interim)
+            if text.hasPrefix(String(current.text.prefix(min(20, current.text.count)))) ||
+               current.text.hasPrefix(String(text.prefix(min(20, text.count)))) {
+                activeInterim = nil
+            }
+        }
+
+        // Print finalized line (bold, permanent)
         let color = speaker == micSpeaker ? green : blue
         print("\(bold)\(color)\(speaker)\(reset): \(text)")
 
-        // Re-render any remaining interim text below the finalized line.
-        // This handles the reorder buffer case: event N+1's interim is already
-        // showing when event N finally flushes from the buffer.
-        let hasInterim = lastInterimText.values.contains { !$0.isEmpty }
-        if hasInterim {
-            for s in [micSpeaker, systemSpeaker] {
-                guard let interim = lastInterimText[s], !interim.isEmpty else { continue }
-                let iColor = s == micSpeaker ? green : blue
-                let line = "\(dim)\(gray)\(iColor)\(s)\(gray): \(interim)\(reset)"
-                print(line, terminator: "")
-                interimLineCount = terminalLineCount(for: line)
-            }
-        }
+        // Re-render remaining processing lines and active interim
+        renderNonFinalizedBlock()
         fflush(stdout)
     }
 
-    /// Clear volatile state for a speaker.
     func clearVolatile(speaker: String) {
         lock.lock()
         defer { lock.unlock() }
-        lastInterimText[speaker] = nil
+        if activeInterim?.speaker == speaker {
+            activeInterim = nil
+        }
+        processingLines.removeAll { $0.speaker == speaker }
     }
 
     func printSummary(duration: TimeInterval, wordCount: Int, filePath: URL, recordingPaths: [URL] = []) {
         lock.lock()
         defer { lock.unlock() }
-        clearInterimBlock()
+        clearNonFinalizedBlock()
+        processingLines.removeAll()
+        activeInterim = nil
         print("\(bold)Session complete.\(reset)")
         print("  Duration:   \(formatDuration(duration))")
         print("  Words:      \(wordCount)")
@@ -124,28 +143,62 @@ final class TerminalUI: Sendable {
 
     // MARK: - Private
 
-    /// Clear the current interim block by moving up and clearing each line.
+    /// Format a processing line (dim italic).
+    private func formatProcessing(speaker: String, text: String) -> String {
+        let color = speaker == micSpeaker ? green : blue
+        return "\(dim)\(italic)\(color)\(speaker)\(reset)\(dim)\(italic): \(text)\(reset)"
+    }
+
+    /// Format an interim line (dim gray).
+    private func formatInterim(speaker: String, text: String) -> String {
+        let color = speaker == micSpeaker ? green : blue
+        return "\(dim)\(gray)\(color)\(speaker)\(gray): \(text)\(reset)"
+    }
+
+    /// Clear the entire non-finalized block (processing lines + active interim).
     /// Caller must hold lock.
-    private func clearInterimBlock() {
-        if interimLineCount > 0 {
-            // Move up through wrapped lines
-            for _ in 0..<interimLineCount {
+    private func clearNonFinalizedBlock() {
+        if nonFinalizedLineCount > 0 {
+            for _ in 0..<nonFinalizedLineCount {
                 print("\(moveUp)\(clearLine)", terminator: "")
             }
         }
-        // Clear the first line (or current line if no wrapping)
         print("\r\(clearLine)", terminator: "")
-        interimLineCount = 0
+        nonFinalizedLineCount = 0
     }
 
-    /// Count how many terminal lines a string occupies (accounting for wrapping).
+    /// Render all non-finalized content: processing lines then active interim.
+    /// Caller must hold lock.
+    private func renderNonFinalizedBlock() {
+        // Clear previous render
+        clearNonFinalizedBlock()
+
+        var totalLines = 0
+
+        // Print processing lines (each on its own line with newline)
+        for proc in processingLines {
+            let line = formatProcessing(speaker: proc.speaker, text: proc.text)
+            print(line)
+            totalLines += 1 + terminalLineCount(for: line)
+        }
+
+        // Print active interim (no newline — stays on current line for updates)
+        if let interim = activeInterim {
+            let line = formatInterim(speaker: interim.speaker, text: interim.text)
+            print(line, terminator: "")
+            totalLines += terminalLineCount(for: line)
+        }
+
+        nonFinalizedLineCount = totalLines
+        fflush(stdout)
+    }
+
+    /// Count how many *extra* terminal lines a string occupies from wrapping.
     private func terminalLineCount(for text: String) -> Int {
         let columns = overrideColumns ?? Self.terminalWidth()
         guard columns > 0 else { return 0 }
-        // Strip ANSI codes to get visible character count
         let plain = text.replacingOccurrences(of: "\u{001B}\\[[0-9;]*m", with: "", options: .regularExpression)
         guard plain.count > 0 else { return 0 }
-        // Number of *extra* lines beyond the first (wrapping)
         return (plain.count - 1) / columns
     }
 
