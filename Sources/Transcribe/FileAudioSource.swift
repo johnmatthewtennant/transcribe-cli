@@ -52,6 +52,10 @@ final class FileAudioSource: Sendable {
 
     /// Read the audio file and emit timestamped buffers. Returns when the file is fully read.
     func start() async throws {
+        // Ensure stream is always finished, regardless of success/failure/cancellation.
+        // This prevents downstream consumers from waiting forever on an unfinished stream.
+        defer { continuation.finish() }
+
         let file = try AVAudioFile(forReading: filePath)
         let fileFormat = file.processingFormat
         let totalFrames = AVAudioFrameCount(file.length)
@@ -142,6 +146,12 @@ final class FileAudioSource: Sendable {
                 if let error {
                     throw TranscribeError.captureError("Audio format conversion failed: \(error.localizedDescription)")
                 }
+                // Guard against 0-frame conversion output to prevent infinite loop
+                guard convertedBuffer.frameLength > 0 else {
+                    throw TranscribeError.captureError(
+                        "Audio format conversion produced 0 frames at position \(framesRead)/\(totalFrames)"
+                    )
+                }
                 buffer = convertedBuffer
             } else {
                 guard let readBuffer = AVAudioPCMBuffer(pcmFormat: readFormat, frameCapacity: framesToRead) else {
@@ -179,8 +189,6 @@ final class FileAudioSource: Sendable {
 
             framesRead += buffer.frameLength
         }
-
-        continuation.finish()
     }
 
     func stop() {
