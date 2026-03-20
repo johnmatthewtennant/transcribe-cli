@@ -1,31 +1,33 @@
 import Foundation
 
-/// Handles colored terminal output, volatile preview, and session summary.
+/// Handles colored terminal output with inline interim text.
+///
+/// Interim (volatile) text is printed inline in gray/dim, occupying the same
+/// position as finalized text. When finalized text arrives, it overwrites the
+/// interim block in place (moving up to clear the interim lines, then printing
+/// the finalized version in bold). This eliminates the visual gap between
+/// interim disappearing and finalized appearing.
 final class TerminalUI: Sendable {
     private let micSpeaker: String
     private let systemSpeaker: String
     private let showInterim: Bool
-    // Injectable terminal width for testing; nil means query the real terminal
     private let overrideColumns: Int?
 
-    // ANSI color codes
+    // ANSI codes
     private let green = "\u{001B}[32m"
     private let blue = "\u{001B}[34m"
     private let gray = "\u{001B}[90m"
+    private let dim = "\u{001B}[2m"
     private let bold = "\u{001B}[1m"
     private let reset = "\u{001B}[0m"
-    private let clearLine = "\u{001B}[2K"    // Clear current line
-    private let moveUp = "\u{001B}[1A"      // Move cursor up one line
+    private let clearLine = "\u{001B}[2K"
+    private let moveUp = "\u{001B}[1A"
 
-    // Serialization lock for terminal output and mutable state
     private let lock = NSLock()
-    // Track last volatile text per speaker — never show less than what was already visible
-    // Protected by lock; nonisolated(unsafe) suppresses Sendable warning
-    nonisolated(unsafe) private var lastVolatile: [String: String] = [:]
-    nonisolated(unsafe) private var stickyVolatile: Set<String> = []
-    nonisolated(unsafe) private var lastUpdatedSpeaker: String?
-    // How many terminal lines the last volatile render occupied (for clearing)
-    nonisolated(unsafe) private var lastVolatileLineCount = 0
+    // How many terminal lines the current interim block occupies
+    nonisolated(unsafe) private var interimLineCount = 0
+    // Last interim text per speaker (for non-retraction guard)
+    nonisolated(unsafe) private var lastInterimText: [String: String] = [:]
 
     init(micSpeaker: String, systemSpeaker: String, showInterim: Bool = false, overrideColumns: Int? = nil) {
         self.micSpeaker = micSpeaker
@@ -34,150 +36,83 @@ final class TerminalUI: Sendable {
         self.overrideColumns = overrideColumns
     }
 
-    /// Print an info message.
     func printInfo(_ message: String) {
         lock.lock()
         defer { lock.unlock() }
         print("\(gray)[\(message)]\(reset)")
     }
 
-    /// Print an error message.
     func printError(_ message: String) {
         lock.lock()
         defer { lock.unlock() }
         FileHandle.standardError.write("\(bold)\u{001B}[31mError: \(message)\(reset)\n".data(using: .utf8)!)
     }
 
-    /// Show a volatile (partial) result — overwrites the current line.
-    /// Keeps the longest interim text visible until finalized replaces it,
-    /// so text doesn't vanish when the recognizer retracts while re-processing.
-    /// Renders ALL active speakers on the volatile line so dual-channel interims
-    /// don't fight over a single terminal line.
+    /// Show interim text inline — printed in dim gray at the current position.
+    /// Each update clears the previous interim block and reprints.
+    /// Only shows remote/system speaker interim.
     func showVolatile(speaker: String, text: String) {
         guard showInterim else { return }
-        // Skip local/mic interim — only show remote/system
         guard speaker != micSpeaker else { return }
         lock.lock()
         defer { lock.unlock() }
-        // If this speaker was sticky (post-finalization), reset its state so the
-        // non-retraction rule starts fresh for the new speech segment.
-        if stickyVolatile.contains(speaker) {
-            lastVolatile[speaker] = nil
-            stickyVolatile.remove(speaker)
-        }
-        let previous = lastVolatile[speaker] ?? ""
-        // Only update if new text is at least as long — never retract visible text
-        let display = text.count >= previous.count ? text : previous
-        lastVolatile[speaker] = display
-        lastUpdatedSpeaker = speaker
-        // Clear any remaining sticky speakers (other channels that finalized)
-        for sticky in stickyVolatile {
-            lastVolatile[sticky] = nil
-        }
-        stickyVolatile.removeAll()
-        renderVolatileLine()
+
+        lastInterimText[speaker] = text
+
+        // Clear previous interim block
+        clearInterimBlock()
+
+        // Print new interim inline (dim gray)
+        let color = speaker == micSpeaker ? green : blue
+        let line = "\(dim)\(gray)\(color)\(speaker)\(gray): \(text)\(reset)"
+        print(line, terminator: "")
+        fflush(stdout)
+
+        // Track how many lines this occupied
+        interimLineCount = terminalLineCount(for: line)
     }
 
-    /// Clear volatile state for a speaker. Call this when the next interim
-    /// arrives for a new segment (i.e., after finalization has already printed).
-    func clearVolatile(speaker: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        lastVolatile[speaker] = nil
-        stickyVolatile.remove(speaker)
-    }
-
-    /// Show a finalized result — prints a full line.
-    /// Marks the speaker as "sticky" — its last interim stays visible on the volatile
-    /// line for one more repaint, then gets cleared when another speaker updates.
-    /// This prevents a blank gap between finalization and the next speech segment.
+    /// Show finalized text — clears the interim block, prints the finalized line,
+    /// then re-renders any remaining interim text below it.
+    /// The interim text persists through finalization so there's no visual gap.
     func showFinalized(speaker: String, text: String) {
         lock.lock()
         defer { lock.unlock() }
+
+        // Clear interim block visually
+        clearInterimBlock()
+
+        // Print finalized line (bold, with newline — becomes permanent)
         let color = speaker == micSpeaker ? green : blue
-        // Clear previous volatile output
-        for _ in 0..<lastVolatileLineCount {
-            print("\(moveUp)\(clearLine)", terminator: "")
-        }
-        print("\r\(clearLine)", terminator: "")
-        lastVolatileLineCount = 0
-        // Clear volatile state for this speaker — don't show stale interim
-        lastVolatile[speaker] = nil
-        // Print finalized line
         print("\(bold)\(color)\(speaker)\(reset): \(text)")
+
+        // Re-render any remaining interim text below the finalized line.
+        // This handles the reorder buffer case: event N+1's interim is already
+        // showing when event N finally flushes from the buffer.
+        let hasInterim = lastInterimText.values.contains { !$0.isEmpty }
+        if hasInterim {
+            for s in [micSpeaker, systemSpeaker] {
+                guard let interim = lastInterimText[s], !interim.isEmpty else { continue }
+                let iColor = s == micSpeaker ? green : blue
+                let line = "\(dim)\(gray)\(iColor)\(s)\(gray): \(interim)\(reset)"
+                print(line, terminator: "")
+                interimLineCount = terminalLineCount(for: line)
+            }
+        }
         fflush(stdout)
     }
 
-    /// Compute the speaker/text pairs that should appear on the volatile line.
-    /// Handles dual-channel layout, narrow-terminal fallback, and truncation.
-    /// Caller must hold lock.
-    private func computeVolatileSegments() -> [(speaker: String, text: String)] {
-        return [micSpeaker, systemSpeaker].compactMap { speaker in
-            guard let text = lastVolatile[speaker], !text.isEmpty else { return nil }
-            return (speaker: speaker, text: text)
-        }
-    }
-
-    /// Render all active volatile texts on the current (bottom) line.
-    /// When both speakers have active interims, both are shown side-by-side
-    /// so neither channel's text vanishes while the other updates.
-    /// On narrow terminals where both won't fit, falls back to a single speaker.
-    /// Note: text is sanitized upstream (TranscriptionEngine.sanitizeText) before reaching here.
-    /// Caller must hold lock.
-    private func renderVolatileLine() {
-        let segments = computeVolatileSegments()
-        guard !segments.isEmpty else { return }
-
-        var parts: [String] = []
-        for seg in segments {
-            let color = seg.speaker == micSpeaker ? green : blue
-            parts.append("\(gray)[\(color)\(seg.speaker)\(gray)] \(seg.text)\(reset)")
-        }
-        let text = parts.joined(separator: " ")
-
-        // Clear previous volatile output by moving up and clearing each line
-        for _ in 0..<lastVolatileLineCount {
-            print("\(moveUp)\(clearLine)", terminator: "")
-        }
-        print("\r\(clearLine)", terminator: "")
-
-        // Print new volatile text (may wrap across multiple lines)
-        print(text, terminator: "")
-        fflush(stdout)
-
-        // Track how many lines this text occupied
-        let columns = overrideColumns ?? Self.terminalWidth()
-        let plainLen = text.replacingOccurrences(of: "\u{001B}\\[[0-9;]*m", with: "", options: .regularExpression).count
-        lastVolatileLineCount = max(0, (plainLen - 1) / columns)
-    }
-
-    /// Returns the segments that would be rendered on the volatile line (for testing).
-    /// Each entry is (speaker, truncatedText) without ANSI codes.
-    func volatileSegments() -> [(speaker: String, text: String)] {
+    /// Clear volatile state for a speaker.
+    func clearVolatile(speaker: String) {
         lock.lock()
         defer { lock.unlock() }
-        return computeVolatileSegments()
+        lastInterimText[speaker] = nil
     }
 
-    /// Query terminal width via ioctl; returns 80 if unavailable.
-    private static func terminalWidth() -> Int {
-        var ws = winsize()
-        if ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0, ws.ws_col > 0 {
-            return Int(ws.ws_col)
-        }
-        return 80
-    }
-
-    /// Print session summary on exit.
     func printSummary(duration: TimeInterval, wordCount: Int, filePath: URL, recordingPaths: [URL] = []) {
         lock.lock()
         defer { lock.unlock() }
-        // Clear any remaining volatile text
-        for _ in 0..<lastVolatileLineCount {
-            print("\(moveUp)\(clearLine)", terminator: "")
-        }
-        print("\r\(clearLine)", terminator: "")
-        lastVolatileLineCount = 0
+        clearInterimBlock()
         print("\(bold)Session complete.\(reset)")
         print("  Duration:   \(formatDuration(duration))")
         print("  Words:      \(wordCount)")
@@ -185,6 +120,41 @@ final class TerminalUI: Sendable {
         for path in recordingPaths {
             print("  Recording:  \(path.path)")
         }
+    }
+
+    // MARK: - Private
+
+    /// Clear the current interim block by moving up and clearing each line.
+    /// Caller must hold lock.
+    private func clearInterimBlock() {
+        if interimLineCount > 0 {
+            // Move up through wrapped lines
+            for _ in 0..<interimLineCount {
+                print("\(moveUp)\(clearLine)", terminator: "")
+            }
+        }
+        // Clear the first line (or current line if no wrapping)
+        print("\r\(clearLine)", terminator: "")
+        interimLineCount = 0
+    }
+
+    /// Count how many terminal lines a string occupies (accounting for wrapping).
+    private func terminalLineCount(for text: String) -> Int {
+        let columns = overrideColumns ?? Self.terminalWidth()
+        guard columns > 0 else { return 0 }
+        // Strip ANSI codes to get visible character count
+        let plain = text.replacingOccurrences(of: "\u{001B}\\[[0-9;]*m", with: "", options: .regularExpression)
+        guard plain.count > 0 else { return 0 }
+        // Number of *extra* lines beyond the first (wrapping)
+        return (plain.count - 1) / columns
+    }
+
+    static func terminalWidth() -> Int {
+        var ws = winsize()
+        if ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0, ws.ws_col > 0 {
+            return Int(ws.ws_col)
+        }
+        return 80
     }
 
     private func formatDuration(_ seconds: TimeInterval) -> String {
