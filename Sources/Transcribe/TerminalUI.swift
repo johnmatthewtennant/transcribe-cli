@@ -5,6 +5,8 @@ final class TerminalUI: Sendable {
     private let micSpeaker: String
     private let systemSpeaker: String
     private let showInterim: Bool
+    // Injectable terminal width for testing; nil means query the real terminal
+    private let overrideColumns: Int?
 
     // ANSI color codes
     private let green = "\u{001B}[32m"
@@ -20,10 +22,11 @@ final class TerminalUI: Sendable {
     // Protected by lock; nonisolated(unsafe) suppresses Sendable warning
     nonisolated(unsafe) private var lastVolatile: [String: String] = [:]
 
-    init(micSpeaker: String, systemSpeaker: String, showInterim: Bool = false) {
+    init(micSpeaker: String, systemSpeaker: String, showInterim: Bool = false, overrideColumns: Int? = nil) {
         self.micSpeaker = micSpeaker
         self.systemSpeaker = systemSpeaker
         self.showInterim = showInterim
+        self.overrideColumns = overrideColumns
     }
 
     /// Print an info message.
@@ -56,48 +59,109 @@ final class TerminalUI: Sendable {
         renderVolatileLine()
     }
 
-    /// Show a finalized result — prints a full line.
-    /// Clears the volatile tracking for this speaker so the next interim starts fresh.
-    /// Re-renders the volatile line if the other speaker still has active interim text.
-    func showFinalized(speaker: String, text: String) {
+    /// Clear volatile state for a speaker. Call this when the next interim
+    /// arrives for a new segment (i.e., after finalization has already printed).
+    func clearVolatile(speaker: String) {
         lock.lock()
         defer { lock.unlock() }
         lastVolatile[speaker] = nil
+    }
+
+    /// Show a finalized result — prints a full line.
+    /// Does NOT clear volatile tracking — the last interim stays visible
+    /// until the next interim arrives, preventing a blank gap between
+    /// finalization and the start of the next speech segment.
+    func showFinalized(speaker: String, text: String) {
+        lock.lock()
+        defer { lock.unlock() }
         let color = speaker == micSpeaker ? green : blue
         // Clear volatile line first, then print finalized
         print("\(clearLine)\(bold)\(color)\(speaker)\(reset): \(text)")
         if showInterim {
             // Blank line buffer: volatile text overwrites this instead of the finalized line
             print("")
-            // If the other speaker still has volatile text, re-render it
+            // Re-render volatile line (other speaker's interim, or this speaker's last interim)
             renderVolatileLine()
         }
         fflush(stdout)
     }
 
+    /// Compute the speaker/text pairs that should appear on the volatile line.
+    /// Handles dual-channel layout, narrow-terminal fallback, and truncation.
+    /// Caller must hold lock.
+    private func computeVolatileSegments() -> [(speaker: String, text: String)] {
+        var speakers = [micSpeaker, systemSpeaker].filter { lastVolatile[$0]?.isEmpty == false }
+        guard !speakers.isEmpty else { return [] }
+
+        let columns = overrideColumns ?? Self.terminalWidth()
+
+        // Minimum readable text width per speaker
+        let minTextPerSpeaker = 10
+
+        if speakers.count > 1 {
+            // Check if both speakers fit on one line
+            let labelOverhead = speakers.reduce(0) { $0 + $1.count + 3 } + (speakers.count - 1)
+            let availableForText = columns - labelOverhead
+            if availableForText < speakers.count * minTextPerSpeaker {
+                // Too narrow for both — show only the last speaker in our stable order
+                // (systemSpeaker if both active, since it's last in [mic, system])
+                speakers = [speakers.last!]
+            }
+        }
+
+        // Compute per-speaker text budget — never exceed terminal width
+        let labelOverhead = speakers.reduce(0) { $0 + $1.count + 3 } + max(speakers.count - 1, 0)
+        let maxTextWidth = max(0, (columns - labelOverhead) / speakers.count)
+
+        return speakers.compactMap { speaker in
+            guard let text = lastVolatile[speaker] else { return nil }
+            let truncated: String
+            if maxTextWidth <= 3 {
+                truncated = String(text.prefix(maxTextWidth))
+            } else if text.count > maxTextWidth {
+                truncated = String(text.prefix(maxTextWidth - 3)) + "..."
+            } else {
+                truncated = text
+            }
+            return (speaker: speaker, text: truncated)
+        }
+    }
+
     /// Render all active volatile texts on the current (bottom) line.
     /// When both speakers have active interims, both are shown side-by-side
     /// so neither channel's text vanishes while the other updates.
+    /// On narrow terminals where both won't fit, falls back to a single speaker.
+    /// Note: text is sanitized upstream (TranscriptionEngine.sanitizeText) before reaching here.
     /// Caller must hold lock.
     private func renderVolatileLine() {
-        let active = lastVolatile.filter { !$0.value.isEmpty }
-        guard !active.isEmpty else { return }
+        let segments = computeVolatileSegments()
+        guard !segments.isEmpty else { return }
 
-        // Give each speaker roughly half the width when both are active
-        let maxTextWidth = active.count > 1 ? 35 : 77
-
-        var segments: [String] = []
-        for speaker in [micSpeaker, systemSpeaker] {
-            guard let text = active[speaker] else { continue }
-            let color = speaker == micSpeaker ? green : blue
-            let truncated = text.count > maxTextWidth
-                ? String(text.prefix(maxTextWidth - 3)) + "..."
-                : text
-            segments.append("\(gray)[\(color)\(speaker)\(gray)] \(truncated)\(reset)")
+        var parts: [String] = []
+        for seg in segments {
+            let color = seg.speaker == micSpeaker ? green : blue
+            parts.append("\(gray)[\(color)\(seg.speaker)\(gray)] \(seg.text)\(reset)")
         }
 
-        print("\(clearLine)\(segments.joined(separator: " "))", terminator: "")
+        print("\(clearLine)\(parts.joined(separator: " "))", terminator: "")
         fflush(stdout)
+    }
+
+    /// Returns the segments that would be rendered on the volatile line (for testing).
+    /// Each entry is (speaker, truncatedText) without ANSI codes.
+    func volatileSegments() -> [(speaker: String, text: String)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return computeVolatileSegments()
+    }
+
+    /// Query terminal width via ioctl; returns 80 if unavailable.
+    private static func terminalWidth() -> Int {
+        var ws = winsize()
+        if ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0, ws.ws_col > 0 {
+            return Int(ws.ws_col)
+        }
+        return 80
     }
 
     /// Print session summary on exit.
