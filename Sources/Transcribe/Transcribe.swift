@@ -559,20 +559,24 @@ func parseTranscriptLines(from content: String) -> [TranscriptLine] {
     return results
 }
 
-/// Strip ANSI escape sequences and control characters (except space) from a string.
+/// Strip ANSI/OSC/DCS escape sequences and all Unicode control characters from a string.
+/// Prevents terminal injection when printing historical transcript content.
 private func stripControlChars(_ str: String) -> String {
-    // Remove ANSI escape sequences first
-    var cleaned = str.replacingOccurrences(of: "\u{001B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
-    // Remove remaining control characters (ASCII < 32, except space isn't < 32)
-    cleaned = cleaned.filter { char in
-        guard let ascii = char.asciiValue else { return true }
-        return ascii >= 32
-    }
+    // Remove ESC-based sequences: CSI (ESC[), OSC (ESC]), DCS (ESC P), and other ESC+char
+    var cleaned = str.replacingOccurrences(
+        of: "\u{001B}(?:\\[[0-9;]*[A-Za-z]|\\][^\u{001B}\u{07}]*(?:\u{07}|\u{001B}\\\\)|P[^\u{001B}]*\u{001B}\\\\|.)",
+        with: "",
+        options: .regularExpression
+    )
+    // Remove C1 CSI (U+009B) sequences
+    cleaned = cleaned.replacingOccurrences(of: "\u{009B}[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
+    // Remove all Unicode control characters (C0, DEL, C1) except space (U+0020)
+    let controlChars = CharacterSet.controlCharacters
+    cleaned = cleaned.unicodeScalars.filter { !controlChars.contains($0) }.map { String($0) }.joined()
     return cleaned
 }
 
 /// Read an existing transcript file and print all finalized speaker lines to the TUI.
-/// Uses line-by-line enumeration to avoid loading large files entirely into memory.
 func printExistingTranscript(filePath: URL, terminal: TerminalUI) {
     guard let contents = try? String(contentsOf: filePath, encoding: .utf8) else {
         terminal.printInfo("Could not read previous transcript: \(filePath.lastPathComponent)")

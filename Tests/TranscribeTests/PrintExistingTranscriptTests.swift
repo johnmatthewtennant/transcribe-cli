@@ -92,6 +92,17 @@ struct ParseTranscriptLinesTests {
         #expect(!lines[0].text.contains("\u{08}"))
     }
 
+    @Test func stripsDELAndC1ControlChars() {
+        // DEL (0x7F) and C1 control range (U+0080...U+009F)
+        let content = "**Speaker** (10:00:00): Hello\u{7F}world\u{009B}31mred"
+        let lines = parseTranscriptLines(from: content)
+        #expect(lines.count == 1)
+        #expect(!lines[0].text.contains("\u{7F}"))
+        #expect(!lines[0].text.contains("\u{009B}"))
+        #expect(lines[0].text.contains("Hello"))
+        #expect(lines[0].text.contains("world"))
+    }
+
     // MARK: - Format variants
 
     @Test func handlesMultiWordSpeakerNames() {
