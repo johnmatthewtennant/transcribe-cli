@@ -12,7 +12,6 @@ import Foundation
 /// recognizer finalizes it, the processing line is replaced with bold finalized text.
 final class TerminalUI: Sendable {
     private let micSpeaker: String
-    private let systemSpeaker: String
     private let showInterim: Bool
     private let overrideColumns: Int?
 
@@ -30,8 +29,8 @@ final class TerminalUI: Sendable {
 
     /// Processing lines: interim text that stopped updating and is awaiting finalization.
     /// These are printed inline (normal weight) and replaced when finalized.
-    /// Each entry is (speaker, text, terminalLineCount).
-    nonisolated(unsafe) private var processingLines: [(speaker: String, text: String, lines: Int)] = []
+    /// Each entry is (speaker, text).
+    nonisolated(unsafe) private var processingLines: [(speaker: String, text: String)] = []
 
     /// Current active interim text (the one still being updated by the recognizer).
     nonisolated(unsafe) private var activeInterim: (speaker: String, text: String)?
@@ -41,7 +40,9 @@ final class TerminalUI: Sendable {
 
     init(micSpeaker: String, systemSpeaker: String, showInterim: Bool = false, overrideColumns: Int? = nil) {
         self.micSpeaker = micSpeaker
-        self.systemSpeaker = systemSpeaker
+        // systemSpeaker accepted for API compatibility but not stored;
+        // color logic keys off micSpeaker (green) vs everything else (blue).
+        _ = systemSpeaker
         self.showInterim = showInterim
         self.overrideColumns = overrideColumns
     }
@@ -71,9 +72,7 @@ final class TerminalUI: Sendable {
         if let current = activeInterim, current.speaker == speaker {
             if text.count < current.text.count {
                 // Promote old interim to processing
-                let procLine = formatProcessing(speaker: current.speaker, text: current.text)
-                let lineCount = terminalLineCount(for: procLine)
-                processingLines.append((speaker: current.speaker, text: current.text, lines: lineCount))
+                processingLines.append((speaker: current.speaker, text: current.text))
             }
         }
 
@@ -117,7 +116,7 @@ final class TerminalUI: Sendable {
     }
 
     /// Print an existing transcript line (historical, from a resumed file).
-    /// Uses the same bold speaker format as live finalized text.
+    /// Uses colored speaker format (without bold, to distinguish from live finalized text).
     func printExistingLine(speaker: String, text: String) {
         lock.lock()
         defer { lock.unlock() }
