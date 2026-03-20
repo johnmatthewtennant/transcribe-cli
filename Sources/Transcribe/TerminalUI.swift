@@ -14,8 +14,11 @@ final class TerminalUI: Sendable {
     private let reset = "\u{001B}[0m"
     private let clearLine = "\u{001B}[2K\r"
 
-    // Serialization lock for terminal output
+    // Serialization lock for terminal output and mutable state
     private let lock = NSLock()
+    // Track last volatile text per speaker — never show less than what was already visible
+    // Protected by lock; nonisolated(unsafe) suppresses Sendable warning
+    nonisolated(unsafe) private var lastVolatile: [String: String] = [:]
 
     init(micSpeaker: String, systemSpeaker: String, showInterim: Bool = false) {
         self.micSpeaker = micSpeaker
@@ -38,20 +41,28 @@ final class TerminalUI: Sendable {
     }
 
     /// Show a volatile (partial) result — overwrites the current line.
+    /// Keeps the longest interim text visible until finalized replaces it,
+    /// so text doesn't vanish when the recognizer retracts while re-processing.
     func showVolatile(speaker: String, text: String) {
         guard showInterim else { return }
         lock.lock()
         defer { lock.unlock() }
+        let previous = lastVolatile[speaker] ?? ""
+        // Only update if new text is at least as long — never retract visible text
+        let display = text.count >= previous.count ? text : previous
+        lastVolatile[speaker] = display
         let color = speaker == micSpeaker ? green : blue
-        let truncated = text.count > 80 ? String(text.prefix(77)) + "..." : text
+        let truncated = display.count > 80 ? String(display.prefix(77)) + "..." : display
         print("\(clearLine)\(gray)[\(color)\(speaker)\(gray)] \(truncated)\(reset)", terminator: "")
         fflush(stdout)
     }
 
     /// Show a finalized result — prints a full line.
+    /// Clears the volatile tracking for this speaker so the next interim starts fresh.
     func showFinalized(speaker: String, text: String) {
         lock.lock()
         defer { lock.unlock() }
+        lastVolatile[speaker] = nil
         let color = speaker == micSpeaker ? green : blue
         // Clear volatile line first, then print finalized
         print("\(clearLine)\(bold)\(color)\(speaker)\(reset): \(text)")
