@@ -157,6 +157,11 @@ struct Transcribe: AsyncParsableCommand {
             sourceAudioFilename: fileURL.lastPathComponent
         )
 
+        // Print existing transcript lines when resuming
+        if isResume {
+            printExistingTranscript(filePath: outputPath, terminal: terminal)
+        }
+
         if isStereo {
             // Stereo: split into two channel-specific file sources with shared origin time
             let sharedOrigin = mach_continuous_time()
@@ -275,6 +280,11 @@ struct Transcribe: AsyncParsableCommand {
             micSpeaker: micSpeaker,
             systemSpeaker: systemSpeaker
         )
+
+        // Print existing transcript lines when resuming
+        if isResume {
+            printExistingTranscript(filePath: filePath, terminal: terminal)
+        }
 
         // Set up audio capture
         terminal.printInfo("Starting audio capture...")
@@ -512,6 +522,29 @@ func mostRecentRecording(in dir: URL) throws -> String {
         throw ValidationError("No recordings found in \(dir.path). Record something first.")
     }
     return most.lastPathComponent
+}
+
+/// Read an existing transcript file and print all finalized speaker lines to the TUI.
+/// Parses markdown lines matching `**Speaker** (timestamp): text`.
+func printExistingTranscript(filePath: URL, terminal: TerminalUI) {
+    guard let contents = try? String(contentsOf: filePath, encoding: .utf8) else { return }
+
+    // Match lines like: **Speaker Name** (12:34:56): Some transcript text
+    let pattern = #/^\*\*(.+?)\*\*\s*\([^)]*\):\s*(.+)$/#
+    var lineCount = 0
+    for line in contents.components(separatedBy: .newlines) {
+        if let match = line.firstMatch(of: pattern) {
+            let speaker = String(match.1)
+            let text = String(match.2)
+            terminal.printExistingLine(speaker: speaker, text: text)
+            lineCount += 1
+        }
+    }
+    if lineCount > 0 {
+        terminal.printInfo("Loaded \(lineCount) previous line\(lineCount == 1 ? "" : "s")")
+        // Print a blank line to separate old transcript from new
+        print("")
+    }
 }
 
 func listRecordings(in dir: URL) throws {

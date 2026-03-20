@@ -21,7 +21,6 @@ final class TerminalUI: Sendable {
     private let blue = "\u{001B}[34m"
     private let gray = "\u{001B}[90m"
     private let dim = "\u{001B}[2m"
-    private let italic = "\u{001B}[3m"
     private let bold = "\u{001B}[1m"
     private let reset = "\u{001B}[0m"
     private let clearLine = "\u{001B}[2K"
@@ -126,6 +125,15 @@ final class TerminalUI: Sendable {
         processingLines.removeAll { $0.speaker == speaker }
     }
 
+    /// Print an existing transcript line (historical, from a resumed file).
+    /// Uses the same bold speaker format as live finalized text.
+    func printExistingLine(speaker: String, text: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let color = speaker == micSpeaker ? green : blue
+        print("\(color)\(speaker)\(reset): \(text)")
+    }
+
     func printSummary(duration: TimeInterval, wordCount: Int, filePath: URL, recordingPaths: [URL] = []) {
         lock.lock()
         defer { lock.unlock() }
@@ -144,15 +152,16 @@ final class TerminalUI: Sendable {
     // MARK: - Private
 
     /// Format a processing line (dim italic).
+    /// Format a processing line (normal weight — between bold finalized and dim interim).
     private func formatProcessing(speaker: String, text: String) -> String {
         let color = speaker == micSpeaker ? green : blue
-        return "\(dim)\(italic)\(color)\(speaker)\(reset)\(dim)\(italic): \(text)\(reset)"
+        return "\(color)\(speaker)\(reset): \(text)"
     }
 
-    /// Format an interim line (dim gray).
+    /// Format an interim line (dim — lightest weight).
     private func formatInterim(speaker: String, text: String) -> String {
         let color = speaker == micSpeaker ? green : blue
-        return "\(dim)\(gray)\(color)\(speaker)\(gray): \(text)\(reset)"
+        return "\(dim)\(color)\(speaker)\(reset)\(dim): \(text)\(reset)"
     }
 
     /// Clear the entire non-finalized block (processing lines + active interim).
