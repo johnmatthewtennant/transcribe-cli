@@ -61,11 +61,18 @@ final class TerminalUI: Sendable {
     private func handleResize() {
         lock.lock()
         defer { lock.unlock() }
-        // Recalculate line counts for processing lines with new terminal width
-        for i in 0..<processingLines.count {
-            let line = formatProcessing(speaker: processingLines[i].speaker, text: processingLines[i].text)
-            processingLines[i].lines = terminalLineCount(for: line)
+        // Calculate total visible characters in the non-finalized block to get
+        // a safe upper bound on lines to clear (assumes minimum 20 columns).
+        var totalChars = 0
+        for proc in processingLines {
+            totalChars += proc.speaker.count + proc.text.count + 5
         }
+        if let interim = activeInterim {
+            totalChars += interim.speaker.count + interim.text.count + 5
+        }
+        // Clear at least as many lines as the old count, but also enough for
+        // worst-case wrapping (total chars / 20 cols)
+        nonFinalizedLineCount = max(nonFinalizedLineCount, totalChars / 20)
         renderNonFinalizedBlock()
     }
 
