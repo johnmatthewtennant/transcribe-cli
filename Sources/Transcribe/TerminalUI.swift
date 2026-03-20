@@ -14,7 +14,8 @@ final class TerminalUI: Sendable {
     private let gray = "\u{001B}[90m"
     private let bold = "\u{001B}[1m"
     private let reset = "\u{001B}[0m"
-    private let clearLine = "\u{001B}[2K\r"
+    private let clearToEnd = "\u{001B}[J"  // Clear from cursor to end of screen
+    private let clearLine = "\r\u{001B}[J"  // Move to start of line + clear everything below
 
     // Serialization lock for terminal output and mutable state
     private let lock = NSLock()
@@ -55,6 +56,8 @@ final class TerminalUI: Sendable {
     /// don't fight over a single terminal line.
     func showVolatile(speaker: String, text: String) {
         guard showInterim else { return }
+        // Skip local/mic interim — only show remote/system
+        guard speaker != micSpeaker else { return }
         lock.lock()
         defer { lock.unlock() }
         // If this speaker was sticky (post-finalization), reset its state so the
@@ -110,43 +113,9 @@ final class TerminalUI: Sendable {
     /// Handles dual-channel layout, narrow-terminal fallback, and truncation.
     /// Caller must hold lock.
     private func computeVolatileSegments() -> [(speaker: String, text: String)] {
-        var speakers = [micSpeaker, systemSpeaker].filter { lastVolatile[$0]?.isEmpty == false }
-        guard !speakers.isEmpty else { return [] }
-
-        let columns = overrideColumns ?? Self.terminalWidth()
-
-        // Minimum readable text width per speaker
-        let minTextPerSpeaker = 10
-
-        if speakers.count > 1 {
-            // Check if both speakers fit on one line
-            let labelOverhead = speakers.reduce(0) { $0 + $1.count + 3 } + (speakers.count - 1)
-            let availableForText = columns - labelOverhead
-            if availableForText < speakers.count * minTextPerSpeaker {
-                // Too narrow for both — show only the most recently updated speaker
-                if let recent = lastUpdatedSpeaker, speakers.contains(recent) {
-                    speakers = [recent]
-                } else {
-                    speakers = [speakers.last!]
-                }
-            }
-        }
-
-        // Compute per-speaker text budget — never exceed terminal width
-        let labelOverhead = speakers.reduce(0) { $0 + $1.count + 3 } + max(speakers.count - 1, 0)
-        let maxTextWidth = max(0, (columns - labelOverhead) / speakers.count)
-
-        return speakers.compactMap { speaker in
-            guard let text = lastVolatile[speaker] else { return nil }
-            let truncated: String
-            if maxTextWidth <= 3 {
-                truncated = String(text.prefix(maxTextWidth))
-            } else if text.count > maxTextWidth {
-                truncated = String(text.prefix(maxTextWidth - 3)) + "..."
-            } else {
-                truncated = text
-            }
-            return (speaker: speaker, text: truncated)
+        return [micSpeaker, systemSpeaker].compactMap { speaker in
+            guard let text = lastVolatile[speaker], !text.isEmpty else { return nil }
+            return (speaker: speaker, text: text)
         }
     }
 
