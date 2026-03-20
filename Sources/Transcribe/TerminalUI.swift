@@ -40,11 +40,33 @@ final class TerminalUI: Sendable {
     /// Terminal lines occupied by the entire non-finalized block (processing + interim).
     nonisolated(unsafe) private var nonFinalizedLineCount = 0
 
+    /// Global reference for SIGWINCH handler (only one TerminalUI exists at a time).
+    nonisolated(unsafe) private static var activeInstance: TerminalUI?
+
     init(micSpeaker: String, systemSpeaker: String, showInterim: Bool = false, overrideColumns: Int? = nil) {
         self.micSpeaker = micSpeaker
         self.systemSpeaker = systemSpeaker
         self.showInterim = showInterim
         self.overrideColumns = overrideColumns
+
+        if showInterim && overrideColumns == nil {
+            TerminalUI.activeInstance = self
+            signal(SIGWINCH) { _ in
+                TerminalUI.activeInstance?.handleResize()
+            }
+        }
+    }
+
+    /// Re-render the non-finalized block after terminal resize.
+    private func handleResize() {
+        lock.lock()
+        defer { lock.unlock() }
+        // Recalculate line counts for processing lines with new terminal width
+        for i in 0..<processingLines.count {
+            let line = formatProcessing(speaker: processingLines[i].speaker, text: processingLines[i].text)
+            processingLines[i].lines = terminalLineCount(for: line)
+        }
+        renderNonFinalizedBlock()
     }
 
     func printInfo(_ message: String) {
