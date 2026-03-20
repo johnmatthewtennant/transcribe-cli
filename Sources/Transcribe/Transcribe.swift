@@ -30,10 +30,13 @@ struct Transcribe: AsyncParsableCommand {
     @Option(name: .long, help: "Title for the recording session.")
     var title: String?
 
-    @Option(name: .long, help: "Resume a previous recording by filename. Use --resume-last for the most recent.")
-    var resume: String?
+    @Flag(name: .long, help: "Resume a previous recording. Resumes the most recent by default, or specify a file with --resume-file.")
+    var resume = false
 
-    @Flag(name: .long, help: "Resume the most recent recording.")
+    @Option(name: .customLong("resume-file"), help: "Resume a specific recording by filename.")
+    var resumeFile: String?
+
+    @Flag(name: .customLong("resume-last"), help: .hidden)
     var resumeLast = false
 
     @Flag(name: .long, help: "List past recordings.")
@@ -134,7 +137,7 @@ struct Transcribe: AsyncParsableCommand {
         try await ensureSpeechModel(terminal: terminal)
 
         // Determine output file
-        let resumeTarget: String? = if let resume { resume } else if resumeLast { try mostRecentRecording(in: transcriptsDir) } else { nil }
+        let resumeTarget: String? = if let resumeFile { resumeFile } else if resume || resumeLast { try mostRecentRecording(in: transcriptsDir) } else { nil }
         let (outputPath, isResume) = try resolveOutputFile(
             transcriptsDir: transcriptsDir,
             title: fileTitle,
@@ -252,7 +255,7 @@ struct Transcribe: AsyncParsableCommand {
         let systemSpeaker = speakerNames.1
 
         // Determine output file
-        let resumeTarget: String? = if let resume { resume } else if resumeLast { try mostRecentRecording(in: transcriptsDir) } else { nil }
+        let resumeTarget: String? = if let resumeFile { resumeFile } else if resume || resumeLast { try mostRecentRecording(in: transcriptsDir) } else { nil }
 
         let (filePath, isResume) = try resolveOutputFile(
             transcriptsDir: transcriptsDir,
