@@ -14,10 +14,8 @@ final class TerminalUI: Sendable {
     private let gray = "\u{001B}[90m"
     private let bold = "\u{001B}[1m"
     private let reset = "\u{001B}[0m"
-    private let clearToEnd = "\u{001B}[J"    // Clear from cursor to end of screen
-    private let saveCursor = "\u{001B}7"    // Save cursor position
-    private let restoreCursor = "\u{001B}8" // Restore cursor position
-    private let clearLine = "\u{001B}[2K\r" // Clear current line + carriage return
+    private let clearLine = "\u{001B}[2K"    // Clear current line
+    private let moveUp = "\u{001B}[1A"      // Move cursor up one line
 
     // Serialization lock for terminal output and mutable state
     private let lock = NSLock()
@@ -26,8 +24,8 @@ final class TerminalUI: Sendable {
     nonisolated(unsafe) private var lastVolatile: [String: String] = [:]
     nonisolated(unsafe) private var stickyVolatile: Set<String> = []
     nonisolated(unsafe) private var lastUpdatedSpeaker: String?
-    // Whether we've saved the cursor position for the volatile area
-    nonisolated(unsafe) private var cursorSaved = false
+    // How many terminal lines the last volatile render occupied (for clearing)
+    nonisolated(unsafe) private var lastVolatileLineCount = 0
 
     init(micSpeaker: String, systemSpeaker: String, showInterim: Bool = false, overrideColumns: Int? = nil) {
         self.micSpeaker = micSpeaker
@@ -97,15 +95,14 @@ final class TerminalUI: Sendable {
         lock.lock()
         defer { lock.unlock() }
         let color = speaker == micSpeaker ? green : blue
-        if cursorSaved {
-            // Restore cursor to clear any volatile text, then print finalized
-            print("\(restoreCursor)\(clearToEnd)\(bold)\(color)\(speaker)\(reset): \(text)")
-        } else {
-            print("\(bold)\(color)\(speaker)\(reset): \(text)")
+        // Clear previous volatile output
+        for _ in 0..<lastVolatileLineCount {
+            print("\(moveUp)\(clearLine)", terminator: "")
         }
-        // Save cursor after finalized line — volatile text renders below this point
-        print(saveCursor, terminator: "")
-        cursorSaved = true
+        print("\r\(clearLine)", terminator: "")
+        lastVolatileLineCount = 0
+        // Print finalized line
+        print("\(bold)\(color)\(speaker)\(reset): \(text)")
         if showInterim {
             // Re-render volatile line below the finalized text
             renderVolatileLine()
@@ -138,16 +135,22 @@ final class TerminalUI: Sendable {
             let color = seg.speaker == micSpeaker ? green : blue
             parts.append("\(gray)[\(color)\(seg.speaker)\(gray)] \(seg.text)\(reset)")
         }
+        let text = parts.joined(separator: " ")
 
-        if cursorSaved {
-            // Restore to start of volatile area, clear, re-save, print
-            print("\(restoreCursor)\(clearToEnd)\(saveCursor)\(parts.joined(separator: " "))", terminator: "")
-        } else {
-            // First volatile render — save cursor here, then print
-            print("\(saveCursor)\(parts.joined(separator: " "))", terminator: "")
-            cursorSaved = true
+        // Clear previous volatile output by moving up and clearing each line
+        for _ in 0..<lastVolatileLineCount {
+            print("\(moveUp)\(clearLine)", terminator: "")
         }
+        print("\r\(clearLine)", terminator: "")
+
+        // Print new volatile text (may wrap across multiple lines)
+        print(text, terminator: "")
         fflush(stdout)
+
+        // Track how many lines this text occupied
+        let columns = overrideColumns ?? Self.terminalWidth()
+        let plainLen = text.replacingOccurrences(of: "\u{001B}\\[[0-9;]*m", with: "", options: .regularExpression).count
+        lastVolatileLineCount = max(0, (plainLen - 1) / columns)
     }
 
     /// Returns the segments that would be rendered on the volatile line (for testing).
@@ -171,7 +174,12 @@ final class TerminalUI: Sendable {
     func printSummary(duration: TimeInterval, wordCount: Int, filePath: URL, recordingPaths: [URL] = []) {
         lock.lock()
         defer { lock.unlock() }
-        print("\(clearLine)")
+        // Clear any remaining volatile text
+        for _ in 0..<lastVolatileLineCount {
+            print("\(moveUp)\(clearLine)", terminator: "")
+        }
+        print("\r\(clearLine)", terminator: "")
+        lastVolatileLineCount = 0
         print("\(bold)Session complete.\(reset)")
         print("  Duration:   \(formatDuration(duration))")
         print("  Words:      \(wordCount)")
