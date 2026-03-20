@@ -4,7 +4,7 @@ import Foundation
 ///
 /// Three visual states for text:
 /// - **Finalized** (bold): permanent, committed by the recognizer
-/// - **Processing** (dim italic): was interim, recognizer stopped updating it, awaiting finalization
+/// - **Processing** (normal weight): was interim, recognizer stopped updating it, awaiting finalization
 /// - **Interim** (dim gray): actively being updated by the recognizer
 ///
 /// When interim text stops growing and new interim starts for a different segment,
@@ -29,7 +29,7 @@ final class TerminalUI: Sendable {
     private let lock = NSLock()
 
     /// Processing lines: interim text that stopped updating and is awaiting finalization.
-    /// These are printed inline (dim italic) and replaced when finalized.
+    /// These are printed inline (normal weight) and replaced when finalized.
     /// Each entry is (speaker, text, terminalLineCount).
     nonisolated(unsafe) private var processingLines: [(speaker: String, text: String, lines: Int)] = []
 
@@ -116,15 +116,6 @@ final class TerminalUI: Sendable {
         fflush(stdout)
     }
 
-    func clearVolatile(speaker: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        if activeInterim?.speaker == speaker {
-            activeInterim = nil
-        }
-        processingLines.removeAll { $0.speaker == speaker }
-    }
-
     /// Print an existing transcript line (historical, from a resumed file).
     /// Uses the same bold speaker format as live finalized text.
     func printExistingLine(speaker: String, text: String) {
@@ -151,7 +142,6 @@ final class TerminalUI: Sendable {
 
     // MARK: - Private
 
-    /// Format a processing line (dim italic).
     /// Format a processing line (normal weight — between bold finalized and dim interim).
     private func formatProcessing(speaker: String, text: String) -> String {
         let color = speaker == micSpeaker ? green : blue
