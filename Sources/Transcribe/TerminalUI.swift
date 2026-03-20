@@ -101,12 +101,10 @@ final class TerminalUI: Sendable {
         }
         print("\r\(clearLine)", terminator: "")
         lastVolatileLineCount = 0
+        // Clear volatile state for this speaker — don't show stale interim
+        lastVolatile[speaker] = nil
         // Print finalized line
         print("\(bold)\(color)\(speaker)\(reset): \(text)")
-        if showInterim {
-            // Re-render volatile line below the finalized text
-            renderVolatileLine()
-        }
         fflush(stdout)
     }
 
