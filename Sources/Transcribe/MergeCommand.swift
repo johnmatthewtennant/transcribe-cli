@@ -1,3 +1,4 @@
+#if compiler(>=6.2)
 import ArgumentParser
 import Foundation
 
@@ -142,3 +143,4 @@ struct MergeCommand: ParsableCommand {
         }
     }
 }
+#endif

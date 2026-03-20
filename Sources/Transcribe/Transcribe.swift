@@ -18,8 +18,14 @@ struct Transcribe: AsyncParsableCommand {
             Report issues:
               gh api repos/johnmatthewtennant/transcribe-cli/issues --method POST -f title="..." -f body="..."
             """,
-        subcommands: [MergeCommand.self]
+        subcommands: _subcommands
     )
+
+    #if compiler(>=6.2)
+    private static let _subcommands: [ParsableCommand.Type] = [MergeCommand.self]
+    #else
+    private static let _subcommands: [ParsableCommand.Type] = []
+    #endif
 
     @Option(name: .long, help: "Title for the recording session.")
     var title: String?
