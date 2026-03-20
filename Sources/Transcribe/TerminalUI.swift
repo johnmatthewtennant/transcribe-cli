@@ -14,8 +14,10 @@ final class TerminalUI: Sendable {
     private let gray = "\u{001B}[90m"
     private let bold = "\u{001B}[1m"
     private let reset = "\u{001B}[0m"
-    private let clearToEnd = "\u{001B}[J"  // Clear from cursor to end of screen
-    private let clearLine = "\r\u{001B}[J"  // Move to start of line + clear everything below
+    private let clearToEnd = "\u{001B}[J"    // Clear from cursor to end of screen
+    private let saveCursor = "\u{001B}7"    // Save cursor position
+    private let restoreCursor = "\u{001B}8" // Restore cursor position
+    private let clearLine = "\u{001B}[2K\r" // Clear current line + carriage return
 
     // Serialization lock for terminal output and mutable state
     private let lock = NSLock()
@@ -40,6 +42,11 @@ final class TerminalUI: Sendable {
         lock.lock()
         defer { lock.unlock() }
         print("\(gray)[\(message)]\(reset)")
+        // Save cursor after each info line so volatile text starts below
+        if showInterim {
+            print(saveCursor, terminator: "")
+            fflush(stdout)
+        }
     }
 
     /// Print an error message.
@@ -95,15 +102,13 @@ final class TerminalUI: Sendable {
     func showFinalized(speaker: String, text: String) {
         lock.lock()
         defer { lock.unlock() }
-        // Mark as sticky: survives this repaint, cleared on next showVolatile from other speaker
-        stickyVolatile.insert(speaker)
         let color = speaker == micSpeaker ? green : blue
-        // Clear volatile line first, then print finalized
-        print("\(clearLine)\(bold)\(color)\(speaker)\(reset): \(text)")
+        // Restore cursor to clear any volatile text, then print finalized
+        print("\(restoreCursor)\(clearToEnd)\(bold)\(color)\(speaker)\(reset): \(text)")
+        // Save cursor after finalized line — volatile text renders below this point
+        print(saveCursor, terminator: "")
         if showInterim {
-            // Blank line buffer: volatile text overwrites this instead of the finalized line
-            print("")
-            // Re-render volatile line (other speaker's interim, or this speaker's sticky interim)
+            // Re-render volatile line below the finalized text
             renderVolatileLine()
         }
         fflush(stdout)
@@ -135,7 +140,11 @@ final class TerminalUI: Sendable {
             parts.append("\(gray)[\(color)\(seg.speaker)\(gray)] \(seg.text)\(reset)")
         }
 
-        print("\(clearLine)\(parts.joined(separator: " "))", terminator: "")
+        // Restore to saved position (clears previous volatile text even if it wrapped),
+        // then clear everything from there down, then print new volatile text
+        print("\(restoreCursor)\(clearToEnd)\(parts.joined(separator: " "))", terminator: "")
+        // Save cursor position for next volatile update
+        print(saveCursor, terminator: "")
         fflush(stdout)
     }
 
