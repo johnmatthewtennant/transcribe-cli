@@ -137,7 +137,7 @@ struct Transcribe: AsyncParsableCommand {
         try await ensureSpeechModel(terminal: terminal)
 
         // Determine output file
-        let resumeTarget: String? = if let resumeFile { resumeFile } else if resume || resumeLast { try mostRecentRecording(in: transcriptsDir) } else { nil }
+        let resumeTarget = try resolveResumeTarget(resumeFile: resumeFile, resume: resume, resumeLast: resumeLast, transcriptsDir: transcriptsDir)
         let (outputPath, isResume) = try resolveOutputFile(
             transcriptsDir: transcriptsDir,
             title: fileTitle,
@@ -255,7 +255,7 @@ struct Transcribe: AsyncParsableCommand {
         let systemSpeaker = speakerNames.1
 
         // Determine output file
-        let resumeTarget: String? = if let resumeFile { resumeFile } else if resume || resumeLast { try mostRecentRecording(in: transcriptsDir) } else { nil }
+        let resumeTarget = try resolveResumeTarget(resumeFile: resumeFile, resume: resume, resumeLast: resumeLast, transcriptsDir: transcriptsDir)
 
         let (filePath, isResume) = try resolveOutputFile(
             transcriptsDir: transcriptsDir,
@@ -508,6 +508,16 @@ func resolveOutputFile(transcriptsDir: URL, title: String?, resume: String?) thr
     let filePath = transcriptsDir.appendingPathComponent(filename)
 
     return (filePath, false)
+}
+
+/// Resolve the resume target based on CLI flags.
+/// - `resumeFile` takes priority (explicit filename).
+/// - `resume` or `resumeLast` flag selects the most recent recording.
+/// - Returns nil if no resume flags are set.
+func resolveResumeTarget(resumeFile: String?, resume: Bool, resumeLast: Bool, transcriptsDir: URL) throws -> String? {
+    if let resumeFile { return resumeFile }
+    if resume || resumeLast { return try mostRecentRecording(in: transcriptsDir) }
+    return nil
 }
 
 func mostRecentRecording(in dir: URL) throws -> String {

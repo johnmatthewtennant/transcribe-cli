@@ -164,3 +164,60 @@ struct MostRecentRecordingTests {
         #expect(result == "recording.md")
     }
 }
+
+@Suite("Resume Target Resolution")
+struct ResumeTargetTests {
+    let tmpDir: URL
+
+    init() throws {
+        tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("transcribe-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+    }
+
+    func cleanup() {
+        try? FileManager.default.removeItem(at: tmpDir)
+    }
+
+    @Test func noFlagsReturnsNil() throws {
+        defer { cleanup() }
+        let result = try resolveResumeTarget(resumeFile: nil, resume: false, resumeLast: false, transcriptsDir: tmpDir)
+        #expect(result == nil)
+    }
+
+    @Test func resumeFlagSelectsMostRecent() throws {
+        defer { cleanup() }
+        FileManager.default.createFile(atPath: tmpDir.appendingPathComponent("old.md").path, contents: nil)
+        Thread.sleep(forTimeInterval: 0.1)
+        FileManager.default.createFile(atPath: tmpDir.appendingPathComponent("new.md").path, contents: nil)
+
+        let result = try resolveResumeTarget(resumeFile: nil, resume: true, resumeLast: false, transcriptsDir: tmpDir)
+        #expect(result == "new.md")
+    }
+
+    @Test func resumeLastFlagSelectsMostRecent() throws {
+        defer { cleanup() }
+        FileManager.default.createFile(atPath: tmpDir.appendingPathComponent("old.md").path, contents: nil)
+        Thread.sleep(forTimeInterval: 0.1)
+        FileManager.default.createFile(atPath: tmpDir.appendingPathComponent("new.md").path, contents: nil)
+
+        let result = try resolveResumeTarget(resumeFile: nil, resume: false, resumeLast: true, transcriptsDir: tmpDir)
+        #expect(result == "new.md")
+    }
+
+    @Test func resumeFileReturnsExplicitFilename() throws {
+        defer { cleanup() }
+        FileManager.default.createFile(atPath: tmpDir.appendingPathComponent("new.md").path, contents: nil)
+
+        let result = try resolveResumeTarget(resumeFile: "specific.md", resume: false, resumeLast: false, transcriptsDir: tmpDir)
+        #expect(result == "specific.md")
+    }
+
+    @Test func resumeFileTakesPriorityOverResumeFlag() throws {
+        defer { cleanup() }
+        FileManager.default.createFile(atPath: tmpDir.appendingPathComponent("new.md").path, contents: nil)
+
+        let result = try resolveResumeTarget(resumeFile: "specific.md", resume: true, resumeLast: false, transcriptsDir: tmpDir)
+        #expect(result == "specific.md")
+    }
+}
