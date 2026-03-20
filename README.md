@@ -24,7 +24,8 @@ transcribe                                 # start recording
 transcribe --title "Weekly sync"           # with title
 transcribe --speakers "Alice,Bob"          # custom speaker names
 transcribe --file recording.m4a            # transcribe audio file
-transcribe --resume-last                   # resume last session
+transcribe --resume                        # resume last session
+transcribe --resume --resume-file foo.md   # resume specific file
 transcribe --list                          # list past recordings
 transcribe --help                          # full usage
 ```

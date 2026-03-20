@@ -85,6 +85,11 @@ struct Transcribe: AsyncParsableCommand {
             return
         }
 
+        // Validate: --resume-file requires --resume
+        if resumeFile != nil && !resume {
+            throw ValidationError("--resume-file requires --resume. Use: transcribe --resume --resume-file <filename>")
+        }
+
         let effectiveShowInterim = showInterim && isatty(STDOUT_FILENO) != 0
 
         if let file {
@@ -490,7 +495,7 @@ func resolveOutputFile(transcriptsDir: URL, title: String?, resume: String?) thr
     if let resumeName = resume {
         let filename = (resumeName as NSString).lastPathComponent
         guard !filename.contains(".."), filename == resumeName else {
-            throw ValidationError("--resume accepts filename only (no paths). Use just the filename from ~/.transcripts/")
+            throw ValidationError("--resume-file accepts filename only (no paths). Use just the filename from ~/Documents/transcripts/")
         }
         let filePath = transcriptsDir.appendingPathComponent(filename)
         guard FileManager.default.fileExists(atPath: filePath.path) else {
