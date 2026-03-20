@@ -29,8 +29,17 @@ struct Transcribe: AsyncParsableCommand {
     @Flag(name: .long, help: "List past recordings.")
     var list = false
 
-    @Flag(name: .customLong("install-skill"), help: "Install the Claude Code skill (symlinks to ~/.claude/skills/ and ~/.agents/skills/).")
+    @Flag(name: .customLong("install-skill"), help: "Install the skill definition. Use with --claude and/or --agents to choose targets. Defaults to both.")
     var installSkill = false
+
+    @Flag(name: .long, help: "Install skill to ~/.claude/skills/ (use with --install-skill).")
+    var claude = false
+
+    @Flag(name: .long, help: "Install skill to ~/.agents/skills/ (use with --install-skill).")
+    var agents = false
+
+    @Flag(name: .long, help: "Overwrite existing skill files (use with --install-skill).")
+    var force = false
 
     @Option(name: .long, help: "Comma-separated speaker names (e.g. \"Alice,Bob\"). First is mic, second is system audio.")
     var speakers: String?
@@ -57,7 +66,9 @@ struct Transcribe: AsyncParsableCommand {
         }
 
         if installSkill {
-            try installSkillFiles()
+            let installClaude = claude || !agents  // default to both if neither specified
+            let installAgents = agents || !claude
+            try installSkillFiles(installClaude: installClaude, installAgents: installAgents, force: force)
             return
         }
 
@@ -458,7 +469,7 @@ func listRecordings(in dir: URL) throws {
 
 // MARK: - Install Skill
 
-func installSkillFiles() throws {
+func installSkillFiles(installClaude: Bool, installAgents: Bool, force: Bool) throws {
     let fm = FileManager.default
 
     // Find SKILL.md relative to the running binary
@@ -479,16 +490,26 @@ func installSkillFiles() throws {
     }
 
     let home = fm.homeDirectoryForCurrentUser
-    let targets = [
-        home.appendingPathComponent(".claude/skills/transcribe-audio"),
-        home.appendingPathComponent(".agents/skills/transcribe-audio"),
-    ]
+    var targets: [URL] = []
+    if installClaude { targets.append(home.appendingPathComponent(".claude/skills/transcribe-audio")) }
+    if installAgents { targets.append(home.appendingPathComponent(".agents/skills/transcribe-audio")) }
 
-    for dir in targets {
-        let dirPath = dir.path
-        let targetPath = dir.appendingPathComponent("SKILL.md").path
+    var failures = 0
+    for targetDir in targets {
+        let targetPath = targetDir.appendingPathComponent("SKILL.md")
 
-        // Remove existing symlink/file at the directory path if it's not a real directory
+        // Check if target already exists
+        if fm.fileExists(atPath: targetPath.path) || (try? fm.destinationOfSymbolicLink(atPath: targetPath.path)) != nil {
+            if !force {
+                fputs("Error: \(targetPath.path) already exists (use --force to overwrite)\n", stderr)
+                failures += 1
+                continue
+            }
+            try fm.removeItem(at: targetPath)
+        }
+
+        // Ensure the directory path is clean (remove broken symlinks or files at directory path)
+        let dirPath = targetDir.path
         var isDir: ObjCBool = false
         if fm.fileExists(atPath: dirPath, isDirectory: &isDir) {
             if !isDir.boolValue {
@@ -503,12 +524,12 @@ func installSkillFiles() throws {
         }
 
         try fm.createDirectory(atPath: dirPath, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: targetPath.path, withDestinationPath: sourcePath.path)
+        print("Installed: \(targetPath.path) -> \(sourcePath.path)")
+    }
 
-        if fm.fileExists(atPath: targetPath) {
-            try fm.removeItem(atPath: targetPath)
-        }
-        try fm.createSymbolicLink(atPath: targetPath, withDestinationPath: sourcePath.path)
-        print("Installed: \(targetPath) -> \(sourcePath.path)")
+    if failures > 0 {
+        throw ExitCode(1)
     }
 }
 
