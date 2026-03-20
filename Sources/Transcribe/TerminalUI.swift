@@ -163,7 +163,8 @@ final class TerminalUI: Sendable {
                 print("\(moveUp)\(clearLine)", terminator: "")
             }
         }
-        print("\r\(clearLine)", terminator: "")
+        // Clear current line + everything below (catches any residual from miscounted wraps)
+        print("\r\(clearLine)\u{001B}[J", terminator: "")
         nonFinalizedLineCount = 0
     }
 
