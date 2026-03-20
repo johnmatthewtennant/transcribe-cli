@@ -24,11 +24,10 @@ final class TerminalUI: Sendable {
     // Track last volatile text per speaker — never show less than what was already visible
     // Protected by lock; nonisolated(unsafe) suppresses Sendable warning
     nonisolated(unsafe) private var lastVolatile: [String: String] = [:]
-    // Speakers whose volatile text is "sticky" — survives one repaint after finalization
-    // then gets cleared on the next repaint triggered by a different speaker.
     nonisolated(unsafe) private var stickyVolatile: Set<String> = []
-    // Most recently updated speaker (for narrow-terminal fallback)
     nonisolated(unsafe) private var lastUpdatedSpeaker: String?
+    // Whether we've saved the cursor position for the volatile area
+    nonisolated(unsafe) private var cursorSaved = false
 
     init(micSpeaker: String, systemSpeaker: String, showInterim: Bool = false, overrideColumns: Int? = nil) {
         self.micSpeaker = micSpeaker
@@ -42,11 +41,6 @@ final class TerminalUI: Sendable {
         lock.lock()
         defer { lock.unlock() }
         print("\(gray)[\(message)]\(reset)")
-        // Save cursor after each info line so volatile text starts below
-        if showInterim {
-            print(saveCursor, terminator: "")
-            fflush(stdout)
-        }
     }
 
     /// Print an error message.
@@ -103,10 +97,15 @@ final class TerminalUI: Sendable {
         lock.lock()
         defer { lock.unlock() }
         let color = speaker == micSpeaker ? green : blue
-        // Restore cursor to clear any volatile text, then print finalized
-        print("\(restoreCursor)\(clearToEnd)\(bold)\(color)\(speaker)\(reset): \(text)")
+        if cursorSaved {
+            // Restore cursor to clear any volatile text, then print finalized
+            print("\(restoreCursor)\(clearToEnd)\(bold)\(color)\(speaker)\(reset): \(text)")
+        } else {
+            print("\(bold)\(color)\(speaker)\(reset): \(text)")
+        }
         // Save cursor after finalized line — volatile text renders below this point
         print(saveCursor, terminator: "")
+        cursorSaved = true
         if showInterim {
             // Re-render volatile line below the finalized text
             renderVolatileLine()
@@ -140,11 +139,14 @@ final class TerminalUI: Sendable {
             parts.append("\(gray)[\(color)\(seg.speaker)\(gray)] \(seg.text)\(reset)")
         }
 
-        // Restore to saved position (clears previous volatile text even if it wrapped),
-        // then clear everything from there down, then print new volatile text
-        print("\(restoreCursor)\(clearToEnd)\(parts.joined(separator: " "))", terminator: "")
-        // Save cursor position for next volatile update
-        print(saveCursor, terminator: "")
+        if cursorSaved {
+            // Restore to start of volatile area, clear, re-save, print
+            print("\(restoreCursor)\(clearToEnd)\(saveCursor)\(parts.joined(separator: " "))", terminator: "")
+        } else {
+            // First volatile render — save cursor here, then print
+            print("\(saveCursor)\(parts.joined(separator: " "))", terminator: "")
+            cursorSaved = true
+        }
         fflush(stdout)
     }
 
