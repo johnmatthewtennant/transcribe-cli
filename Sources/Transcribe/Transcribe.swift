@@ -85,11 +85,6 @@ struct Transcribe: AsyncParsableCommand {
             return
         }
 
-        // Validate: --resume-file requires --resume
-        if resumeFile != nil && !resume {
-            throw ValidationError("--resume-file requires --resume. Use: transcribe --resume --resume-file <filename>")
-        }
-
         let effectiveShowInterim = showInterim && isatty(STDOUT_FILENO) != 0
 
         if let file {
@@ -532,24 +527,54 @@ func mostRecentRecording(in dir: URL) throws -> String {
     return most.lastPathComponent
 }
 
-/// Read an existing transcript file and print all finalized speaker lines to the TUI.
-/// Parses markdown lines matching `**Speaker** (timestamp): text`.
-func printExistingTranscript(filePath: URL, terminal: TerminalUI) {
-    guard let contents = try? String(contentsOf: filePath, encoding: .utf8) else { return }
+/// A parsed transcript line: speaker name and spoken text.
+struct TranscriptLine: Equatable {
+    let speaker: String
+    let text: String
+}
 
-    // Match lines like: **Speaker Name** (12:34:56): Some transcript text
+/// Parse finalized speaker lines from transcript markdown content.
+/// Matches lines like: `**Speaker Name** (12:34:56): Some transcript text`
+/// Strips ANSI/control characters from parsed content to prevent terminal injection.
+func parseTranscriptLines(from content: String) -> [TranscriptLine] {
     let pattern = #/^\*\*(.+?)\*\*\s*\([^)]*\):\s*(.+)$/#
-    var lineCount = 0
-    for line in contents.components(separatedBy: .newlines) {
+    var results: [TranscriptLine] = []
+    for line in content.components(separatedBy: .newlines) {
         if let match = line.firstMatch(of: pattern) {
-            let speaker = String(match.1)
-            let text = String(match.2)
-            terminal.printExistingLine(speaker: speaker, text: text)
-            lineCount += 1
+            let speaker = stripControlChars(String(match.1))
+            let text = stripControlChars(String(match.2))
+            results.append(TranscriptLine(speaker: speaker, text: text))
         }
     }
-    if lineCount > 0 {
-        terminal.printInfo("Loaded \(lineCount) previous line\(lineCount == 1 ? "" : "s")")
+    return results
+}
+
+/// Strip ANSI escape sequences and control characters (except space) from a string.
+private func stripControlChars(_ str: String) -> String {
+    // Remove ANSI escape sequences first
+    var cleaned = str.replacingOccurrences(of: "\u{001B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
+    // Remove remaining control characters (ASCII < 32, except space isn't < 32)
+    cleaned = cleaned.filter { char in
+        guard let ascii = char.asciiValue else { return true }
+        return ascii >= 32
+    }
+    return cleaned
+}
+
+/// Read an existing transcript file and print all finalized speaker lines to the TUI.
+/// Uses line-by-line enumeration to avoid loading large files entirely into memory.
+func printExistingTranscript(filePath: URL, terminal: TerminalUI) {
+    guard let contents = try? String(contentsOf: filePath, encoding: .utf8) else {
+        terminal.printInfo("Could not read previous transcript: \(filePath.lastPathComponent)")
+        return
+    }
+
+    let lines = parseTranscriptLines(from: contents)
+    for line in lines {
+        terminal.printExistingLine(speaker: line.speaker, text: line.text)
+    }
+    if !lines.isEmpty {
+        terminal.printInfo("Loaded \(lines.count) previous line\(lines.count == 1 ? "" : "s")")
         // Print a blank line to separate old transcript from new
         print("")
     }
