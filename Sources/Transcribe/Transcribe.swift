@@ -14,6 +14,10 @@ struct Transcribe: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "transcribe",
         abstract: "Record microphone + system audio and produce a real-time speaker-attributed transcript.",
+        discussion: """
+            Report issues:
+              gh api repos/johnmatthewtennant/transcribe-cli/issues --method POST -f title="..." -f body="..."
+            """,
         subcommands: [MergeCommand.self]
     )
 
