@@ -15,11 +15,12 @@ struct TranscriptEvent: Sendable {
 
 /// Manages SpeechTranscriber instances and merges results.
 /// Supports dual-channel mode (mic + system) for live recording,
-/// and single-channel mode for file transcription.
+/// stereo file mode (left + right channel), and single-channel mode for file transcription.
 @available(macOS 26.0, *)
 actor TranscriptionEngine {
     private let audioCapture: AudioCapture?
     private let fileSource: FileAudioSource?
+    private let stereoFileSources: (left: FileAudioSource, right: FileAudioSource)?
     private let writer: MarkdownWriter
     private let terminal: TerminalUI
     private let micSpeaker: String
@@ -40,6 +41,7 @@ actor TranscriptionEngine {
     ) async throws {
         self.audioCapture = audioCapture
         self.fileSource = nil
+        self.stereoFileSources = nil
         self.writer = writer
         self.terminal = terminal
         self.micSpeaker = micSpeaker
@@ -64,6 +66,7 @@ actor TranscriptionEngine {
     ) async throws {
         self.audioCapture = nil
         self.fileSource = fileSource
+        self.stereoFileSources = nil
         self.writer = writer
         self.terminal = terminal
         self.micSpeaker = speaker
@@ -76,9 +79,40 @@ actor TranscriptionEngine {
         }
     }
 
+    /// Initialize for dual-channel stereo file transcription.
+    /// Left channel = mic/local speaker, right channel = system/remote speaker.
+    init(
+        leftFileSource: FileAudioSource,
+        rightFileSource: FileAudioSource,
+        writer: MarkdownWriter,
+        terminal: TerminalUI,
+        micSpeaker: String,
+        systemSpeaker: String,
+        showInterim: Bool = false
+    ) async throws {
+        self.audioCapture = nil
+        self.fileSource = nil
+        self.stereoFileSources = (left: leftFileSource, right: rightFileSource)
+        self.writer = writer
+        self.terminal = terminal
+        self.micSpeaker = micSpeaker
+        self.systemSpeaker = systemSpeaker
+        self.showInterim = showInterim
+        self.reorderBuffer = ReorderBuffer { _ in }
+        self.reorderBuffer = ReorderBuffer { [writer, terminal] event in
+            writer.writeLine(speaker: event.speaker, text: event.text, wallClockTime: event.wallClockTime)
+            terminal.showFinalized(speaker: event.speaker, text: event.text)
+        }
+    }
+
     /// Run transcription until stopped or input is exhausted.
     func run() async throws {
-        if let fileSource {
+        if let stereoFileSources {
+            try await runStereoFileTranscription(
+                leftSource: stereoFileSources.left,
+                rightSource: stereoFileSources.right
+            )
+        } else if let fileSource {
             try await runFileTranscription(fileSource: fileSource)
         } else if let audioCapture {
             try await runLiveTranscription(audioCapture: audioCapture)
@@ -195,6 +229,88 @@ actor TranscriptionEngine {
             }
 
             await group.waitForAll()
+        }
+    }
+
+    /// Run dual-channel stereo file transcription.
+    /// Mirrors runLiveTranscription but uses file-based audio sources for each channel.
+    private func runStereoFileTranscription(
+        leftSource: FileAudioSource,
+        rightSource: FileAudioSource
+    ) async throws {
+        let reportingOptions: Set<SpeechTranscriber.ReportingOption> = showInterim ? [.volatileResults] : []
+
+        let micTranscriber = SpeechTranscriber(
+            locale: Locale(identifier: "en-US"),
+            transcriptionOptions: [],
+            reportingOptions: reportingOptions,
+            attributeOptions: [.audioTimeRange]
+        )
+        let systemTranscriber = SpeechTranscriber(
+            locale: Locale(identifier: "en-US"),
+            transcriptionOptions: [],
+            reportingOptions: reportingOptions,
+            attributeOptions: [.audioTimeRange]
+        )
+
+        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [micTranscriber]) else {
+            throw TranscribeError.modelUnavailable("No compatible audio format available. The speech model may not be installed.")
+        }
+
+        let micAnalyzer = SpeechAnalyzer(modules: [micTranscriber])
+        let systemAnalyzer = SpeechAnalyzer(modules: [systemTranscriber])
+
+        let leftInput = makeAnalyzerInputStream(from: leftSource.stream, targetFormat: format)
+        let rightInput = makeAnalyzerInputStream(from: rightSource.stream, targetFormat: format)
+
+        // Use a separate flush task with proper cancellation
+        let flushTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(300))
+                await self.periodicFlush()
+            }
+        }
+        defer { flushTask.cancel() }
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            // Feed audio from both channels
+            group.addTask {
+                try await leftSource.start()
+            }
+            group.addTask {
+                try await rightSource.start()
+            }
+            // Run analyzers
+            group.addTask {
+                try await micAnalyzer.start(inputSequence: leftInput)
+            }
+            group.addTask {
+                try await systemAnalyzer.start(inputSequence: rightInput)
+            }
+            // Process results from both channels
+            group.addTask { [self] in
+                await self.processResults(
+                    transcriber: micTranscriber,
+                    speaker: self.micSpeaker,
+                    getOriginHostTime: { leftSource.originHostTime }
+                )
+            }
+            group.addTask { [self] in
+                await self.processResults(
+                    transcriber: systemTranscriber,
+                    speaker: self.systemSpeaker,
+                    getOriginHostTime: { rightSource.originHostTime }
+                )
+            }
+
+            // Wait for all tasks — file sources finish naturally when exhausted,
+            // which causes analyzers to complete, which causes processResults to end.
+            // Ignore CancellationError since that's expected on stop().
+            while let result = await group.nextResult() {
+                if case .failure(let error) = result, !(error is CancellationError) {
+                    throw error
+                }
+            }
         }
     }
 
@@ -363,10 +479,11 @@ func makeAnalyzerInputStream(
 
 /// Fallback transcription engine using SFSpeechRecognizer for older macOS / Swift compilers.
 /// Supports dual-channel mode (mic + system) for live recording,
-/// and single-channel mode for file transcription.
+/// stereo file mode (left + right channel), and single-channel mode for file transcription.
 actor TranscriptionEngine {
     private let audioCapture: AudioCapture?
     private let fileSource: FileAudioSource?
+    private let stereoFileSources: (left: FileAudioSource, right: FileAudioSource)?
     private let writer: MarkdownWriter
     private let terminal: TerminalUI
     private let micSpeaker: String
@@ -387,6 +504,7 @@ actor TranscriptionEngine {
     ) async throws {
         self.audioCapture = audioCapture
         self.fileSource = nil
+        self.stereoFileSources = nil
         self.writer = writer
         self.terminal = terminal
         self.micSpeaker = micSpeaker
@@ -409,6 +527,7 @@ actor TranscriptionEngine {
     ) async throws {
         self.audioCapture = nil
         self.fileSource = fileSource
+        self.stereoFileSources = nil
         self.writer = writer
         self.terminal = terminal
         self.micSpeaker = speaker
@@ -421,9 +540,40 @@ actor TranscriptionEngine {
         }
     }
 
+    /// Initialize for dual-channel stereo file transcription.
+    /// Left channel = mic/local speaker, right channel = system/remote speaker.
+    init(
+        leftFileSource: FileAudioSource,
+        rightFileSource: FileAudioSource,
+        writer: MarkdownWriter,
+        terminal: TerminalUI,
+        micSpeaker: String,
+        systemSpeaker: String,
+        showInterim: Bool = false
+    ) async throws {
+        self.audioCapture = nil
+        self.fileSource = nil
+        self.stereoFileSources = (left: leftFileSource, right: rightFileSource)
+        self.writer = writer
+        self.terminal = terminal
+        self.micSpeaker = micSpeaker
+        self.systemSpeaker = systemSpeaker
+        self.showInterim = showInterim
+        self.reorderBuffer = ReorderBuffer { _ in }
+        self.reorderBuffer = ReorderBuffer { [writer, terminal] event in
+            writer.writeLine(speaker: event.speaker, text: event.text, wallClockTime: event.wallClockTime)
+            terminal.showFinalized(speaker: event.speaker, text: event.text)
+        }
+    }
+
     /// Run transcription until stopped or input is exhausted.
     func run() async throws {
-        if let fileSource {
+        if let stereoFileSources {
+            try await runStereoFileTranscription(
+                leftSource: stereoFileSources.left,
+                rightSource: stereoFileSources.right
+            )
+        } else if let fileSource {
             try await runFileTranscription(fileSource: fileSource)
         } else if let audioCapture {
             try await runLiveTranscription(audioCapture: audioCapture)
@@ -500,12 +650,79 @@ actor TranscriptionEngine {
         }
     }
 
+    /// Run dual-channel stereo file transcription using SFSpeechRecognizer.
+    private func runStereoFileTranscription(
+        leftSource: FileAudioSource,
+        rightSource: FileAudioSource
+    ) async throws {
+        let locale = Locale(identifier: "en-US")
+        guard let testRecognizer = SFSpeechRecognizer(locale: locale),
+              testRecognizer.isAvailable else {
+            throw TranscribeError.modelUnavailable("Speech recognizer not available.")
+        }
+
+        // Use a separate flush task with proper cancellation
+        let flushTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(300))
+                await self.periodicFlush()
+            }
+        }
+        defer { flushTask.cancel() }
+
+        await withTaskGroup(of: Void.self) { group in
+            // Feed audio from both channels
+            group.addTask {
+                try? await leftSource.start()
+            }
+            group.addTask {
+                try? await rightSource.start()
+            }
+            // Run recognition on each channel with lazy origin access
+            group.addTask {
+                await self.runSFRecognition(
+                    locale: locale,
+                    stream: leftSource.stream,
+                    speaker: self.micSpeaker,
+                    getOriginHostTime: { leftSource.originHostTime }
+                )
+            }
+            group.addTask {
+                await self.runSFRecognition(
+                    locale: locale,
+                    stream: rightSource.stream,
+                    speaker: self.systemSpeaker,
+                    getOriginHostTime: { rightSource.originHostTime }
+                )
+            }
+
+            await group.waitForAll()
+        }
+    }
+
     /// Run SFSpeechRecognizer-based recognition on an audio buffer stream.
+    /// Accepts a static originHostTime for backward compatibility.
     private nonisolated func runSFRecognition(
         locale: Locale,
         stream: AsyncStream<TimestampedBuffer>,
         speaker: String,
         originHostTime: UInt64
+    ) async {
+        await runSFRecognition(
+            locale: locale,
+            stream: stream,
+            speaker: speaker,
+            getOriginHostTime: { originHostTime }
+        )
+    }
+
+    /// Run SFSpeechRecognizer-based recognition on an audio buffer stream.
+    /// Uses a lazy closure for originHostTime (needed when the value is set after start).
+    private nonisolated func runSFRecognition(
+        locale: Locale,
+        stream: AsyncStream<TimestampedBuffer>,
+        speaker: String,
+        getOriginHostTime: @Sendable () -> UInt64
     ) async {
         guard let recognizer = SFSpeechRecognizer(locale: locale) else { return }
         let request = SFSpeechAudioBufferRecognitionRequest()
@@ -526,6 +743,7 @@ actor TranscriptionEngine {
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
             if result.isFinal {
+                let originHostTime = getOriginHostTime()
                 let wallClock = originHostTime + UInt64(Date().timeIntervalSince1970 * 1_000_000_000) % 1_000_000_000
 
                 let event = TranscriptEvent(
