@@ -722,7 +722,7 @@ actor TranscriptionEngine {
         locale: Locale,
         stream: AsyncStream<TimestampedBuffer>,
         speaker: String,
-        getOriginHostTime: @Sendable () -> UInt64
+        getOriginHostTime: @escaping @Sendable () -> UInt64
     ) async {
         guard let recognizer = SFSpeechRecognizer(locale: locale) else { return }
         let request = SFSpeechAudioBufferRecognitionRequest()
