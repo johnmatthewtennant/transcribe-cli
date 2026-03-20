@@ -137,7 +137,7 @@ struct Transcribe: AsyncParsableCommand {
         try await ensureSpeechModel(terminal: terminal)
 
         // Determine output file
-        let resumeTarget: String? = if let resumeFile { resumeFile } else if resume || resumeLast { try mostRecentRecording(in: transcriptsDir) } else { nil }
+        let resumeTarget = try resolveResumeTarget(resumeFile: resumeFile, resume: resume, resumeLast: resumeLast, transcriptsDir: transcriptsDir)
         let (outputPath, isResume) = try resolveOutputFile(
             transcriptsDir: transcriptsDir,
             title: fileTitle,
@@ -255,7 +255,7 @@ struct Transcribe: AsyncParsableCommand {
         let systemSpeaker = speakerNames.1
 
         // Determine output file
-        let resumeTarget: String? = if let resumeFile { resumeFile } else if resume || resumeLast { try mostRecentRecording(in: transcriptsDir) } else { nil }
+        let resumeTarget = try resolveResumeTarget(resumeFile: resumeFile, resume: resume, resumeLast: resumeLast, transcriptsDir: transcriptsDir)
 
         let (filePath, isResume) = try resolveOutputFile(
             transcriptsDir: transcriptsDir,
@@ -490,7 +490,7 @@ func resolveOutputFile(transcriptsDir: URL, title: String?, resume: String?) thr
     if let resumeName = resume {
         let filename = (resumeName as NSString).lastPathComponent
         guard !filename.contains(".."), filename == resumeName else {
-            throw ValidationError("--resume accepts filename only (no paths). Use just the filename from ~/.transcripts/")
+            throw ValidationError("--resume-file accepts filename only (no paths). Use just the filename from ~/Documents/transcripts/")
         }
         let filePath = transcriptsDir.appendingPathComponent(filename)
         guard FileManager.default.fileExists(atPath: filePath.path) else {
@@ -510,6 +510,16 @@ func resolveOutputFile(transcriptsDir: URL, title: String?, resume: String?) thr
     return (filePath, false)
 }
 
+/// Resolve the resume target based on CLI flags.
+/// - `resumeFile` takes priority (explicit filename).
+/// - `resume` or `resumeLast` flag selects the most recent recording.
+/// - Returns nil if no resume flags are set.
+func resolveResumeTarget(resumeFile: String?, resume: Bool, resumeLast: Bool, transcriptsDir: URL) throws -> String? {
+    if let resumeFile { return resumeFile }
+    if resume || resumeLast { return try mostRecentRecording(in: transcriptsDir) }
+    return nil
+}
+
 func mostRecentRecording(in dir: URL) throws -> String {
     guard FileManager.default.fileExists(atPath: dir.path) else {
         throw ValidationError("No recordings found. Record something first.")
@@ -527,24 +537,58 @@ func mostRecentRecording(in dir: URL) throws -> String {
     return most.lastPathComponent
 }
 
-/// Read an existing transcript file and print all finalized speaker lines to the TUI.
-/// Parses markdown lines matching `**Speaker** (timestamp): text`.
-func printExistingTranscript(filePath: URL, terminal: TerminalUI) {
-    guard let contents = try? String(contentsOf: filePath, encoding: .utf8) else { return }
+/// A parsed transcript line: speaker name and spoken text.
+struct TranscriptLine: Equatable {
+    let speaker: String
+    let text: String
+}
 
-    // Match lines like: **Speaker Name** (12:34:56): Some transcript text
+/// Parse finalized speaker lines from transcript markdown content.
+/// Matches lines like: `**Speaker Name** (12:34:56): Some transcript text`
+/// Strips ANSI/control characters from parsed content to prevent terminal injection.
+func parseTranscriptLines(from content: String) -> [TranscriptLine] {
     let pattern = #/^\*\*(.+?)\*\*\s*\([^)]*\):\s*(.+)$/#
-    var lineCount = 0
-    for line in contents.components(separatedBy: .newlines) {
+    var results: [TranscriptLine] = []
+    for line in content.components(separatedBy: .newlines) {
         if let match = line.firstMatch(of: pattern) {
-            let speaker = String(match.1)
-            let text = String(match.2)
-            terminal.printExistingLine(speaker: speaker, text: text)
-            lineCount += 1
+            let speaker = stripControlChars(String(match.1))
+            let text = stripControlChars(String(match.2))
+            results.append(TranscriptLine(speaker: speaker, text: text))
         }
     }
-    if lineCount > 0 {
-        terminal.printInfo("Loaded \(lineCount) previous line\(lineCount == 1 ? "" : "s")")
+    return results
+}
+
+/// Strip ANSI/OSC/DCS escape sequences and all Unicode control characters from a string.
+/// Prevents terminal injection when printing historical transcript content.
+private func stripControlChars(_ str: String) -> String {
+    // Remove ESC-based sequences: CSI (ESC[), OSC (ESC]), DCS (ESC P), and other ESC+char
+    var cleaned = str.replacingOccurrences(
+        of: "\u{001B}(?:\\[[0-9;]*[A-Za-z]|\\][^\u{001B}\u{07}]*(?:\u{07}|\u{001B}\\\\)|P[^\u{001B}]*\u{001B}\\\\|.)",
+        with: "",
+        options: .regularExpression
+    )
+    // Remove C1 CSI (U+009B) sequences
+    cleaned = cleaned.replacingOccurrences(of: "\u{009B}[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
+    // Remove all Unicode control characters (C0, DEL, C1) except space (U+0020)
+    let controlChars = CharacterSet.controlCharacters
+    cleaned = cleaned.unicodeScalars.filter { !controlChars.contains($0) }.map { String($0) }.joined()
+    return cleaned
+}
+
+/// Read an existing transcript file and print all finalized speaker lines to the TUI.
+func printExistingTranscript(filePath: URL, terminal: TerminalUI) {
+    guard let contents = try? String(contentsOf: filePath, encoding: .utf8) else {
+        terminal.printInfo("Could not read previous transcript: \(filePath.lastPathComponent)")
+        return
+    }
+
+    let lines = parseTranscriptLines(from: contents)
+    for line in lines {
+        terminal.printExistingLine(speaker: line.speaker, text: line.text)
+    }
+    if !lines.isEmpty {
+        terminal.printInfo("Loaded \(lines.count) previous line\(lines.count == 1 ? "" : "s")")
         // Print a blank line to separate old transcript from new
         print("")
     }
