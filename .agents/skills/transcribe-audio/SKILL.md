@@ -26,7 +26,6 @@ On-device speech-to-text CLI for macOS using Apple's SpeechAnalyzer. Can transcr
 - `transcribe --title "Meeting"` — transcribe with a session title
 - `transcribe --file recording.m4a` — transcribe an audio file
 - `transcribe --resume` — resume the most recent session
-- `transcribe --resume-file <filename>` — resume a specific session
 
 Transcripts are saved to `~/Documents/transcripts/` as markdown files.
 
