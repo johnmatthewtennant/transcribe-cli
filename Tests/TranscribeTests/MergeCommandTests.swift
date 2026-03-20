@@ -1,3 +1,4 @@
+#if compiler(>=6.2)
 import AVFoundation
 import Testing
 
@@ -231,3 +232,4 @@ struct MergeCommandTests {
                 "Partial output file should be removed after merge failure")
     }
 }
+#endif
