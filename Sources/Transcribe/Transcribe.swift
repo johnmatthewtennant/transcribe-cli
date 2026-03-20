@@ -86,16 +86,42 @@ struct Transcribe: AsyncParsableCommand {
     }
 
     /// Transcribe an existing audio file.
+    /// Automatically detects stereo files and splits channels for dual-speaker transcription.
     private func runFileTranscription(file: String, transcriptsDir: URL, effectiveShowInterim: Bool) async throws {
         let fileURL = URL(fileURLWithPath: (file as NSString).expandingTildeInPath)
             .standardizedFileURL
 
         // Use the filename (without extension) as default title
         let fileTitle = sanitizeTitle(title) ?? fileURL.deletingPathExtension().lastPathComponent
-        let speakerName = speakers.flatMap { $0.split(separator: ",").first.map { sanitizeSpeakerName(String($0.trimmingCharacters(in: .whitespaces))) } } ?? "Speaker"
 
-        let terminal = TerminalUI(micSpeaker: speakerName, systemSpeaker: speakerName, showInterim: effectiveShowInterim)
+        // Detect channel count for stereo handling
+        let channelCount = try FileAudioSource.channelCount(at: fileURL)
+        let isStereo = channelCount >= 2
+
+        if channelCount > 2 {
+            throw TranscribeError.captureError(
+                "File has \(channelCount) channels — only mono (1) and stereo (2) files are supported: \(fileURL.lastPathComponent)"
+            )
+        }
+
+        // Parse speaker names based on mono vs stereo
+        let micSpeaker: String
+        let systemSpeaker: String
+        if isStereo {
+            let names = parseSpeakerNames(speakers)
+            micSpeaker = names.0
+            systemSpeaker = names.1
+        } else {
+            let name = speakers.flatMap { $0.split(separator: ",").first.map { sanitizeSpeakerName(String($0.trimmingCharacters(in: .whitespaces))) } } ?? "Speaker"
+            micSpeaker = name
+            systemSpeaker = name
+        }
+
+        let terminal = TerminalUI(micSpeaker: micSpeaker, systemSpeaker: systemSpeaker, showInterim: effectiveShowInterim)
         terminal.printInfo("Transcribing file: \(fileURL.path)")
+        if isStereo {
+            terminal.printInfo("Stereo file detected — transcribing left channel as \(micSpeaker) and right channel as \(systemSpeaker)")
+        }
 
         // Ensure speech model is available
         terminal.printInfo("Checking speech model availability...")
@@ -120,51 +146,91 @@ struct Transcribe: AsyncParsableCommand {
             filePath: outputPath,
             title: fileTitle,
             isResume: isResume,
-            micSpeaker: speakerName,
-            systemSpeaker: speakerName,
+            micSpeaker: micSpeaker,
+            systemSpeaker: systemSpeaker,
             sourceAudioFilename: fileURL.lastPathComponent
         )
 
-        // Set up file audio source
-        let fileSource = try FileAudioSource(filePath: fileURL)
+        if isStereo {
+            // Stereo: split into two channel-specific file sources with shared origin time
+            let sharedOrigin = mach_continuous_time()
+            let leftSource = try FileAudioSource(filePath: fileURL, channelIndex: 0, sharedOriginHostTime: sharedOrigin)
+            let rightSource = try FileAudioSource(filePath: fileURL, channelIndex: 1, sharedOriginHostTime: sharedOrigin)
 
-        // Set up transcription engine (single-channel)
-        let engine = try await TranscriptionEngine(
-            fileSource: fileSource,
-            writer: writer,
-            terminal: terminal,
-            speaker: speakerName,
-            showInterim: effectiveShowInterim
-        )
+            let engine = try await TranscriptionEngine(
+                leftFileSource: leftSource,
+                rightFileSource: rightSource,
+                writer: writer,
+                terminal: terminal,
+                micSpeaker: micSpeaker,
+                systemSpeaker: systemSpeaker,
+                showInterim: effectiveShowInterim
+            )
 
-        let startTime = Date()
-        setupSignalHandler {
-            Task {
-                await engine.stop()
-                fileSource.stop()
-                writer.flush()
-                terminal.printSummary(
-                    duration: Date().timeIntervalSince(startTime),
-                    wordCount: writer.wordCount,
-                    filePath: outputPath
-                )
-                Foundation.exit(0)
+            let startTime = Date()
+            setupSignalHandler {
+                Task {
+                    await engine.stop()
+                    leftSource.stop()
+                    rightSource.stop()
+                    writer.flush()
+                    terminal.printSummary(
+                        duration: Date().timeIntervalSince(startTime),
+                        wordCount: writer.wordCount,
+                        filePath: outputPath
+                    )
+                    Foundation.exit(0)
+                }
             }
+
+            terminal.printInfo("Transcribing...\n")
+            try await engine.run()
+
+            await engine.stop()
+            writer.flush()
+            terminal.printSummary(
+                duration: Date().timeIntervalSince(startTime),
+                wordCount: writer.wordCount,
+                filePath: outputPath
+            )
+        } else {
+            // Mono: single-channel transcription (existing behavior)
+            let fileSource = try FileAudioSource(filePath: fileURL)
+
+            let engine = try await TranscriptionEngine(
+                fileSource: fileSource,
+                writer: writer,
+                terminal: terminal,
+                speaker: micSpeaker,
+                showInterim: effectiveShowInterim
+            )
+
+            let startTime = Date()
+            setupSignalHandler {
+                Task {
+                    await engine.stop()
+                    fileSource.stop()
+                    writer.flush()
+                    terminal.printSummary(
+                        duration: Date().timeIntervalSince(startTime),
+                        wordCount: writer.wordCount,
+                        filePath: outputPath
+                    )
+                    Foundation.exit(0)
+                }
+            }
+
+            terminal.printInfo("Transcribing...\n")
+            try await engine.run()
+
+            await engine.stop()
+            writer.flush()
+            terminal.printSummary(
+                duration: Date().timeIntervalSince(startTime),
+                wordCount: writer.wordCount,
+                filePath: outputPath
+            )
         }
-
-        terminal.printInfo("Transcribing...\n")
-
-        // Run transcription — will complete when file is fully processed
-        try await engine.run()
-
-        // File transcription completes naturally (unlike live recording)
-        await engine.stop()
-        writer.flush()
-        terminal.printSummary(
-            duration: Date().timeIntervalSince(startTime),
-            wordCount: writer.wordCount,
-            filePath: outputPath
-        )
     }
 
     /// Run live mic + system audio recording and transcription.
