@@ -57,13 +57,19 @@ final class TerminalUI: Sendable {
         guard showInterim else { return }
         lock.lock()
         defer { lock.unlock() }
+        // If this speaker was sticky (post-finalization), reset its state so the
+        // non-retraction rule starts fresh for the new speech segment.
+        if stickyVolatile.contains(speaker) {
+            lastVolatile[speaker] = nil
+            stickyVolatile.remove(speaker)
+        }
         let previous = lastVolatile[speaker] ?? ""
         // Only update if new text is at least as long — never retract visible text
         let display = text.count >= previous.count ? text : previous
         lastVolatile[speaker] = display
         lastUpdatedSpeaker = speaker
-        // Clear any sticky (post-finalization) speakers other than the one updating
-        for sticky in stickyVolatile where sticky != speaker {
+        // Clear any remaining sticky speakers (other channels that finalized)
+        for sticky in stickyVolatile {
             lastVolatile[sticky] = nil
         }
         stickyVolatile.removeAll()

@@ -59,16 +59,27 @@ struct TerminalUIVolatileTests {
         #expect(after[0].text == "sys updated interim")
     }
 
-    @Test func stickyVolatileSurvivesSameSpeakerUpdate() {
+    @Test func stickyResetOnSameSpeakerNewSegment() {
         let ui = makeUI()
         // Mic finalizes, becoming sticky
         ui.showVolatile(speaker: mic, text: "mic interim")
         ui.showFinalized(speaker: mic, text: "mic final")
-        // Mic sends a new volatile — this is a new segment, replaces the sticky state
-        ui.showVolatile(speaker: mic, text: "new mic interim")
+        // Mic sends a shorter new volatile — sticky state resets so the
+        // non-retraction rule starts fresh. The shorter text should win.
+        ui.showVolatile(speaker: mic, text: "hi")
         let segs = ui.volatileSegments()
         #expect(segs.count == 1)
-        #expect(segs[0].text == "new mic interim")
+        #expect(segs[0].text == "hi")
+    }
+
+    @Test func stickyResetOnSameSpeakerLongerText() {
+        let ui = makeUI()
+        ui.showVolatile(speaker: mic, text: "mic interim")
+        ui.showFinalized(speaker: mic, text: "mic final")
+        ui.showVolatile(speaker: mic, text: "new mic interim that is longer")
+        let segs = ui.volatileSegments()
+        #expect(segs.count == 1)
+        #expect(segs[0].text == "new mic interim that is longer")
     }
 
     @Test func clearVolatileRemovesState() {
