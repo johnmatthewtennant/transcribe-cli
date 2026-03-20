@@ -30,10 +30,20 @@ struct TerminalUIVolatileTests {
         #expect(segs[0].text == "longer text here")
     }
 
-    @Test func finalizedClearsVolatile() {
+    @Test func finalizedKeepsVolatileUntilCleared() {
         let ui = makeUI()
         ui.showVolatile(speaker: mic, text: "interim")
         ui.showFinalized(speaker: mic, text: "final text")
+        // showFinalized does NOT clear volatile — last interim persists to avoid blank gap
+        let segs = ui.volatileSegments()
+        #expect(segs.count == 1)
+        #expect(segs[0].text == "interim")
+    }
+
+    @Test func clearVolatileRemovesState() {
+        let ui = makeUI()
+        ui.showVolatile(speaker: mic, text: "interim")
+        ui.clearVolatile(speaker: mic)
         let segs = ui.volatileSegments()
         #expect(segs.isEmpty)
     }
@@ -55,6 +65,8 @@ struct TerminalUIVolatileTests {
         ui.showVolatile(speaker: mic, text: "mic interim")
         ui.showVolatile(speaker: sys, text: "sys interim")
         ui.showFinalized(speaker: mic, text: "mic final")
+        // showFinalized doesn't clear volatile; use clearVolatile for that
+        ui.clearVolatile(speaker: mic)
         let segs = ui.volatileSegments()
         #expect(segs.count == 1)
         #expect(segs[0].speaker == sys)

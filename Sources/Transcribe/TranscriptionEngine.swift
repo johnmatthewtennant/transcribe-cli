@@ -322,6 +322,7 @@ actor TranscriptionEngine {
     ) async {
         var resultCount = 0
         var finalCount = 0
+        nonisolated(unsafe) var lastWasFinal = false
         do {
             for try await result in transcriber.results {
                 guard !isStopped else { break }
@@ -332,10 +333,17 @@ actor TranscriptionEngine {
 
                 if !result.isFinal {
                     // Interim results: display-only, skip timestamp/event construction
+                    if lastWasFinal {
+                        // New segment starting — clear stale interim from previous segment
+                        terminal.clearVolatile(speaker: speaker)
+                        lastWasFinal = false
+                    }
                     let sanitized = text.filter { $0 >= " " }
                     terminal.showVolatile(speaker: speaker, text: sanitized)
                     continue
                 }
+
+                lastWasFinal = true
 
                 // Read originHostTime lazily — it's set by the audio callback on first buffer
                 let originHostTime = getOriginHostTime()
@@ -730,6 +738,7 @@ actor TranscriptionEngine {
 
         nonisolated(unsafe) var finalCount = 0
         nonisolated(unsafe) var previousFinalText = ""
+        nonisolated(unsafe) var lastWasFinalFallback = false
 
         let task = recognizer.recognitionTask(with: request) { result, error in
             guard let result else {
@@ -743,6 +752,7 @@ actor TranscriptionEngine {
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
             if result.isFinal {
+                lastWasFinalFallback = true
                 let originHostTime = getOriginHostTime()
                 let wallClock = originHostTime + UInt64(Date().timeIntervalSince1970 * 1_000_000_000) % 1_000_000_000
 
@@ -756,6 +766,10 @@ actor TranscriptionEngine {
                 Task { await self.addToBuffer(event) }
                 previousFinalText = text
             } else {
+                if lastWasFinalFallback {
+                    Task { await self.terminal.clearVolatile(speaker: speaker) }
+                    lastWasFinalFallback = false
+                }
                 // Show only the new portion beyond what was already finalized
                 let newText = String(text.dropFirst(previousFinalText.count))
                     .trimmingCharacters(in: .whitespaces)
