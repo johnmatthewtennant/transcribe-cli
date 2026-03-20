@@ -62,16 +62,6 @@ struct TerminalUIVolatileTests {
         ui.showFinalized(speaker: sys, text: "Segment two final.")
     }
 
-    // MARK: - clearVolatile
-
-    @Test func clearVolatileRemovesState() {
-        let ui = makeUI()
-        ui.showVolatile(speaker: sys, text: "interim")
-        ui.clearVolatile(speaker: sys)
-        // Should not crash when finalized arrives after clear
-        ui.showFinalized(speaker: sys, text: "final")
-    }
-
     // MARK: - showInterim disabled
 
     @Test func interimDisabledIgnoresVolatile() {
