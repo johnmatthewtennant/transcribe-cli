@@ -30,10 +30,10 @@ struct Transcribe: AsyncParsableCommand {
     @Option(name: .long, help: "Title for the recording session.")
     var title: String?
 
-    @Flag(name: .long, help: "Resume a previous recording. Resumes the most recent by default, or specify a file with --resume-file.")
+    @Flag(name: .long, help: "Resume a previous recording. Resumes the most recent by default.")
     var resume = false
 
-    @Option(name: .customLong("resume-file"), help: "Resume a specific recording by filename.")
+    @Option(name: .customLong("resume-file"), help: .hidden)
     var resumeFile: String?
 
     @Flag(name: .customLong("resume-last"), help: .hidden)
