@@ -30,14 +30,45 @@ struct TerminalUIVolatileTests {
         #expect(segs[0].text == "longer text here")
     }
 
-    @Test func finalizedKeepsVolatileUntilCleared() {
+    // MARK: - Sticky after finalization
+
+    @Test func finalizedKeepsVolatileStickyForOneRepaint() {
         let ui = makeUI()
         ui.showVolatile(speaker: mic, text: "interim")
         ui.showFinalized(speaker: mic, text: "final text")
-        // showFinalized does NOT clear volatile — last interim persists to avoid blank gap
+        // Sticky: last interim persists to avoid blank gap
         let segs = ui.volatileSegments()
         #expect(segs.count == 1)
         #expect(segs[0].text == "interim")
+    }
+
+    @Test func stickyVolatileClearedByOtherSpeakerUpdate() {
+        let ui = makeUI(columns: 80)
+        // Mic has volatile, then finalizes
+        ui.showVolatile(speaker: mic, text: "mic interim")
+        ui.showVolatile(speaker: sys, text: "sys interim")
+        ui.showFinalized(speaker: mic, text: "mic final")
+        // Mic is now sticky — still visible alongside system
+        let before = ui.volatileSegments()
+        #expect(before.count == 2)
+        // System gets a new interim update — mic's sticky state should be cleared
+        ui.showVolatile(speaker: sys, text: "sys updated interim")
+        let after = ui.volatileSegments()
+        #expect(after.count == 1)
+        #expect(after[0].speaker == sys)
+        #expect(after[0].text == "sys updated interim")
+    }
+
+    @Test func stickyVolatileSurvivesSameSpeakerUpdate() {
+        let ui = makeUI()
+        // Mic finalizes, becoming sticky
+        ui.showVolatile(speaker: mic, text: "mic interim")
+        ui.showFinalized(speaker: mic, text: "mic final")
+        // Mic sends a new volatile — this is a new segment, replaces the sticky state
+        ui.showVolatile(speaker: mic, text: "new mic interim")
+        let segs = ui.volatileSegments()
+        #expect(segs.count == 1)
+        #expect(segs[0].text == "new mic interim")
     }
 
     @Test func clearVolatileRemovesState() {
@@ -60,17 +91,18 @@ struct TerminalUIVolatileTests {
         #expect(segs[1].speaker == sys)
     }
 
-    @Test func finalizeOneSpeakerKeepsOther() {
+    @Test func finalizeOneSpeakerThenOtherUpdates() {
         let ui = makeUI(columns: 80)
         ui.showVolatile(speaker: mic, text: "mic interim")
         ui.showVolatile(speaker: sys, text: "sys interim")
         ui.showFinalized(speaker: mic, text: "mic final")
-        // showFinalized doesn't clear volatile; use clearVolatile for that
-        ui.clearVolatile(speaker: mic)
+        // Mic is sticky after finalize, system still active
+        // System gets new update → mic's sticky state cleared
+        ui.showVolatile(speaker: sys, text: "sys new interim")
         let segs = ui.volatileSegments()
         #expect(segs.count == 1)
         #expect(segs[0].speaker == sys)
-        #expect(segs[0].text == "sys interim")
+        #expect(segs[0].text == "sys new interim")
     }
 
     @Test func interleavedUpdates() {
@@ -87,17 +119,27 @@ struct TerminalUIVolatileTests {
 
     // MARK: - Narrow terminal
 
-    @Test func narrowTerminalFallsBackToOneSpeaker() {
+    @Test func narrowTerminalFallsBackToMostRecentSpeaker() {
         // With columns=30 and speakers "Mic" (3) + "System" (6):
         // Label overhead for both = (3+3) + (6+3) + 1 separator = 16
-        // Available text = 30 - 16 = 14, need 2*10=20 → too narrow → fallback to one
+        // Available text = 30 - 16 = 14, need 2*10=20 → too narrow → fallback
         let ui = makeUI(columns: 30)
         ui.showVolatile(speaker: mic, text: "mic text")
         ui.showVolatile(speaker: sys, text: "sys text")
         let segs = ui.volatileSegments()
         #expect(segs.count == 1)
-        // Falls back to last speaker in [mic, system] order = system
+        // Falls back to most recently updated speaker = system (last showVolatile call)
         #expect(segs[0].speaker == sys)
+    }
+
+    @Test func narrowTerminalPrefersMicWhenMicUpdatedLast() {
+        let ui = makeUI(columns: 30)
+        ui.showVolatile(speaker: sys, text: "sys text")
+        ui.showVolatile(speaker: mic, text: "mic text")
+        let segs = ui.volatileSegments()
+        #expect(segs.count == 1)
+        // Mic was updated last
+        #expect(segs[0].speaker == mic)
     }
 
     @Test func veryNarrowTerminalTruncatesAggressively() {

@@ -21,6 +21,11 @@ final class TerminalUI: Sendable {
     // Track last volatile text per speaker — never show less than what was already visible
     // Protected by lock; nonisolated(unsafe) suppresses Sendable warning
     nonisolated(unsafe) private var lastVolatile: [String: String] = [:]
+    // Speakers whose volatile text is "sticky" — survives one repaint after finalization
+    // then gets cleared on the next repaint triggered by a different speaker.
+    nonisolated(unsafe) private var stickyVolatile: Set<String> = []
+    // Most recently updated speaker (for narrow-terminal fallback)
+    nonisolated(unsafe) private var lastUpdatedSpeaker: String?
 
     init(micSpeaker: String, systemSpeaker: String, showInterim: Bool = false, overrideColumns: Int? = nil) {
         self.micSpeaker = micSpeaker
@@ -56,6 +61,12 @@ final class TerminalUI: Sendable {
         // Only update if new text is at least as long — never retract visible text
         let display = text.count >= previous.count ? text : previous
         lastVolatile[speaker] = display
+        lastUpdatedSpeaker = speaker
+        // Clear any sticky (post-finalization) speakers other than the one updating
+        for sticky in stickyVolatile where sticky != speaker {
+            lastVolatile[sticky] = nil
+        }
+        stickyVolatile.removeAll()
         renderVolatileLine()
     }
 
@@ -65,22 +76,25 @@ final class TerminalUI: Sendable {
         lock.lock()
         defer { lock.unlock() }
         lastVolatile[speaker] = nil
+        stickyVolatile.remove(speaker)
     }
 
     /// Show a finalized result — prints a full line.
-    /// Does NOT clear volatile tracking — the last interim stays visible
-    /// until the next interim arrives, preventing a blank gap between
-    /// finalization and the start of the next speech segment.
+    /// Marks the speaker as "sticky" — its last interim stays visible on the volatile
+    /// line for one more repaint, then gets cleared when another speaker updates.
+    /// This prevents a blank gap between finalization and the next speech segment.
     func showFinalized(speaker: String, text: String) {
         lock.lock()
         defer { lock.unlock() }
+        // Mark as sticky: survives this repaint, cleared on next showVolatile from other speaker
+        stickyVolatile.insert(speaker)
         let color = speaker == micSpeaker ? green : blue
         // Clear volatile line first, then print finalized
         print("\(clearLine)\(bold)\(color)\(speaker)\(reset): \(text)")
         if showInterim {
             // Blank line buffer: volatile text overwrites this instead of the finalized line
             print("")
-            // Re-render volatile line (other speaker's interim, or this speaker's last interim)
+            // Re-render volatile line (other speaker's interim, or this speaker's sticky interim)
             renderVolatileLine()
         }
         fflush(stdout)
@@ -103,9 +117,12 @@ final class TerminalUI: Sendable {
             let labelOverhead = speakers.reduce(0) { $0 + $1.count + 3 } + (speakers.count - 1)
             let availableForText = columns - labelOverhead
             if availableForText < speakers.count * minTextPerSpeaker {
-                // Too narrow for both — show only the last speaker in our stable order
-                // (systemSpeaker if both active, since it's last in [mic, system])
-                speakers = [speakers.last!]
+                // Too narrow for both — show only the most recently updated speaker
+                if let recent = lastUpdatedSpeaker, speakers.contains(recent) {
+                    speakers = [recent]
+                } else {
+                    speakers = [speakers.last!]
+                }
             }
         }
 
